@@ -82,17 +82,48 @@ CATEGORY_PREFIXES = {
     "ip_address":     "IP",
 }
 
-# Subnet masks and wildcard masks — never anonymise these
-# Matches values like 255.255.255.0 or 0.0.0.255
-_MASK_RE = re.compile(
+# Standard subnet masks (255.x.x.x or 0.x.x.x patterns with only valid mask octets)
+_SUBNET_MASK_RE = re.compile(
     r'\b(?:255|254|252|248|240|224|192|128|0)'
     r'\.(?:255|254|252|248|240|224|192|128|0)'
     r'\.(?:255|254|252|248|240|224|192|128|0)'
     r'\.(?:255|254|252|248|240|224|192|128|0)\b'
 )
 
-# CIDR prefix lengths — /8, /24, etc. — never anonymise
-_CIDR_RE = re.compile(r'/\d{1,2}\b')
+# ACL wildcard masks: the second IPv4 address on any ACE line (permit/deny)
+# These may use any octet values (e.g. 0.15.255.255) and must not be anonymised.
+# Strategy: scan each ACL line and collect spans of the wildcard (2nd address) positions.
+_IP_RE = re.compile(
+    r'\b((?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b'
+)
+_ACE_LINE_RE = re.compile(
+    r'^\s*(?:\d+\s+)?(?:permit|deny)\s+\S+\s+.*$', re.M
+)
+
+
+def _collect_skip_spans(text: str) -> set[tuple[int, int]]:
+    """Return spans of all IP-like values that must NOT be anonymised."""
+    skip: set[tuple[int, int]] = set()
+
+    # 1. Standard subnet/wildcard masks (well-formed mask octets)
+    for m in _SUBNET_MASK_RE.finditer(text):
+        skip.add(m.span())
+
+    # 2. Wildcard masks in ACE lines — the second IPv4 address on permit/deny lines
+    #    e.g. "permit ip 10.0.0.0 0.255.255.255 any" — preserve 0.255.255.255
+    #    e.g. "deny ip 172.16.0.0 0.15.255.255 any"  — preserve 0.15.255.255
+    for ace in _ACE_LINE_RE.finditer(text):
+        ips_in_ace = list(_IP_RE.finditer(text, ace.start(), ace.end()))
+        # Each src/dst pair: network_addr wildcard_mask — skip every even-indexed
+        # address starting from the first (index 0 = network, index 1 = wildcard)
+        # For "host X" syntax there is no wildcard, so we check pairs.
+        # Simpler and safe: skip every *second* consecutive IP found on the line.
+        i = 1
+        while i < len(ips_in_ace):
+            skip.add(ips_in_ace[i].span())
+            i += 2   # step by 2: skip wildcard, keep next network addr, skip its wildcard…
+
+    return skip
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -159,13 +190,7 @@ class IPAnonymiser:
 
     def anonymise(self, text: str) -> str:
         """Replace host IPs with IP_xxxx tokens; leave masks and CIDR alone."""
-        # Build a set of spans that are masks or CIDR suffixes — skip those
-        skip_spans: set[tuple[int, int]] = set()
-        for m in _MASK_RE.finditer(text):
-            skip_spans.add(m.span())
-        # Also skip the numeric part immediately after a '/' (CIDR prefix length
-        # is not an IP, but the network address before it may have already been
-        # identified; we only skip things that are pure mask/wildcard patterns)
+        skip_spans = _collect_skip_spans(text)
 
         ip_re = re.compile(
             r'\b((?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}'
@@ -175,7 +200,6 @@ class IPAnonymiser:
         prev = 0
         for m in ip_re.finditer(text):
             if m.span() in skip_spans:
-                # It's a mask — emit verbatim
                 parts.append(text[prev:m.end()])
             else:
                 parts.append(text[prev:m.start()])
@@ -329,8 +353,9 @@ class CiscoSanitiser:
             r'\1<REMOVED>', text, "tacacs-server key")
 
         # Flat-style radius-server key (IOS)
+        # host <ip> [<auth-port>] key ... — the port tokens are optional
         text = S(re.compile(
-            r'^(radius-server\s+(?:host\s+\S+\s+\S+\s+)?key[^\S\n]+(?:\d+[^\S\n]+)?)\S+', re.M),
+            r'^(radius-server\s+(?:host\s+\S+(?:\s+\S+)*?\s+)?key[^\S\n]+(?:\d+[^\S\n]+)?)\S+', re.M),
             r'\1<REMOVED>', text, "radius-server key")
 
         # BGP neighbor password (IOS/XE inline)
@@ -384,6 +409,13 @@ class CiscoSanitiser:
         # IOS XR block: "snmp-server community <name>" (name on its own line)
         text = N(re.compile(r'^(snmp-server\s+community\s+)(?P<n>\S+)', re.M),
                  "snmp_community", "SNMP community def (XR)", text)
+
+        # Named ACL after RO/RW on community line (community is already tokenised above)
+        # e.g. "snmp-server community snmp-xxxx RO SNMP-ACCESS-LIST"
+        # Only match alpha-starting names; numeric ACLs are left unchanged
+        text = N(re.compile(
+            r'^(snmp-server\s+community\s+\S+\s+(?:RO|RW)\s+)(?P<n>[A-Za-z]\S*)', re.M),
+                 "acl", "SNMP community ACL ref", text)
 
         # snmp-server host <ip> version 2c <community>
         text = N(re.compile(
@@ -448,6 +480,11 @@ class CiscoSanitiser:
         text = self._sub(
             re.compile(r'(\bdeny\s+)(\d+(?:\.\d+)?)(:\d+)', re.M),
             replace_rt, text, "community deny AS:tag")
+
+        # route-map "set community AS:tag" (bare number:number, no permit/deny keyword)
+        text = self._sub(
+            re.compile(r'(\bset\s+community\s+)(\d+(?:\.\d+)?)(:\d+)', re.M),
+            replace_rt, text, "set community AS:tag")
 
         return text
 
