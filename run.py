@@ -1,0 +1,1 @@
+python cisco_sanitise_pipeline.py -i ./test_configs/ -o ./test_configs_sanitised/ --seed test-run-2024 --dump-map test_mapping.json
