@@ -32,9 +32,10 @@ without exposing credentials, internal addressing, or network topology.
 - **Named objects tokenised** — hostnames, usernames, domain names, VRFs,
   route-maps/policies, policy-maps, class-maps, named ACLs, prefix-lists/sets,
   community-lists/sets, peer-groups, neighbor-groups, keychains, crypto maps,
-  object-groups, IP SLA IDs, track IDs, BGP templates, TACACS/RADIUS server block
-  names, and `aaa group server` block names (with references in `aaa authentication`
-  / `aaa authorization` / `aaa accounting` lines)
+  transform sets, PKI trustpoints, object-groups, IP SLA IDs, track IDs, BGP
+  templates, TACACS/RADIUS server block names, and `aaa group server` block names
+  (with references in `aaa authentication` / `aaa authorization` / `aaa accounting`
+  lines)
 - **Descriptions anonymised** — all `description` text replaced with `desc-xxxx`
   tokens, including inline descriptions on `neighbor` and `prefix-list` lines
 - **Deterministic** — the same seed always produces the same tokens, so outputs are
@@ -276,6 +277,8 @@ grouped by category. Use this to reverse-look up any token in the sanitised outp
 | BGP templates | — | ✓ | — |
 | Keychains | ✓ | ✓ | ✓ |
 | Crypto maps / IKE PSK | ✓ | ✓ | — |
+| Transform sets | ✓ | ✓ | — |
+| PKI trustpoints | — | ✓ | — |
 | Object-groups / IP SLA / Track | ✓ | ✓ | — |
 | TACACS/RADIUS server block names | — | ✓ | — |
 | AAA group server block names + refs | ✓ | ✓ | ✓ |

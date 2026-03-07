@@ -41,6 +41,8 @@ mapping file.
 | TACACS / RADIUS server block name | `srv` | `srv-ebad` |
 | AAA group server block name | `aaag` | `aaag-6afb` |
 | Crypto map | `cmap` | `cmap-7d11` |
+| Transform set | `tset` | `tset-cb48` |
+| PKI trustpoint | `tp` | `tp-89b8` |
 | Keychain name | `kc` | `kc-2a55` |
 | Track object | `trk` | `trk-0e3f` |
 | Object-group | `og` | `og-b912` |
@@ -266,7 +268,7 @@ Anonymised to `vrf-xxxx`. All definition and reference syntaxes are covered:
 | access-group ref | `ip access-group ACL-NAME in` | ✓ | ✓ | — |
 | access-class ref | `access-class ACL-NAME in` (line vty) | ✓ | ✓ | — |
 | match ip address ref | `match ip address ACL-NAME` (route-map) | — | ✓ | — |
-| match address ref | `match address ACL-NAME` (route-map) | ✓ | ✓ | — |
+| match address ref | `match address [acl] ACL-NAME` (route-map) | ✓ | ✓ | — |
 | match access-group name | `match access-group name ACL-NAME` | — | ✓ | — |
 | XR SNMP ACL ref | `RO IPv4 ACL-NAME` / `RW IPv4 ACL-NAME` | — | — | ✓ |
 | SNMP community ACL ref | `snmp-server community snmp-xxxx RO ACL-NAME` | ✓ | ✓ | ✓ |
@@ -310,11 +312,20 @@ entries (e.g. `2001:db8:1::/48`) are also tokenised by the IPv6 address pass.
 | EIGRP key-chain ref | `ip authentication key-chain eigrp 1 KC-NAME` | ✓ | — | — |
 | key-chain ref (generic) | `key-chain KC-NAME` (OSPF / IS-IS) | ✓ | ✓ | — |
 
-#### Other Objects
+#### Crypto, Transform Sets, and PKI Trustpoints
 
 | Rule | Syntax matched | IOS | XE | XR |
 |------|---------------|:---:|:---:|:---:|
 | crypto map | `crypto map CM-NAME 10 ipsec-isakmp` | ✓ | ✓ | — |
+| transform-set def | `crypto ipsec transform-set TSET-NAME esp-aes ...` | ✓ | ✓ | — |
+| transform-set ref | `set transform-set TSET-NAME` (inside crypto map) | ✓ | ✓ | — |
+| pki trustpoint def | `crypto pki trustpoint TP-NAME` | — | ✓ | — |
+| pki certificate chain ref | `crypto pki certificate chain TP-NAME` | — | ✓ | — |
+
+#### Other Objects
+
+| Rule | Syntax matched | IOS | XE | XR |
+|------|---------------|:---:|:---:|:---:|
 | object-group def | `object-group network OG-NAME` | ✓ | ✓ | — |
 | group-object ref | `group-object OG-NAME` (nested object-group) | ✓ | ✓ | — |
 | ip sla def | `ip sla 10` | ✓ | ✓ | — |
@@ -351,7 +362,10 @@ IPv4 host addresses are anonymised after all named-object and credential passes.
 - **Special addresses preserved** — `0.0.0.0` and `255.255.255.255` exactly
 - **Subnet masks preserved** — standard mask octets (255/254/252/248/240/224/192/128/0)
 - **Wildcard masks preserved** — second address on ACE lines and `network` statement
-  lines preserved by position
+  lines preserved by position; bare EIGRP `network` statements with no wildcard
+  (e.g. `network 172.16.0.0`) are matched and their single address is tokenised
+  correctly (the trailing-content group in `_NETWORK_STMT_RE` uses `[ \t]+` rather
+  than `\s+` to prevent adjacent lines from being merged into a single match)
 
 ---
 
@@ -430,6 +444,8 @@ IPv6 host addresses are anonymised last, after the IPv4 pass.
 | BGP neighbor-groups (XR) | — | — | ✓ |
 | Keychains | ✓ | ✓ | ✓ |
 | Crypto maps | ✓ | ✓ | — |
+| Transform sets | ✓ | ✓ | — |
+| PKI trustpoints | — | ✓ | — |
 | Object-groups | ✓ | ✓ | — |
 | IP SLA | ✓ | ✓ | — |
 | Track objects | ✓ | ✓ | — |
@@ -526,7 +542,8 @@ definition line and all `aaa authentication` / `aaa authorization` reference lin
 
 **IPv4 addresses tokenised**
 All non-loopback host addresses replaced with `IPv4-xxxx` tokens. Subnet masks and
-wildcard masks untouched.
+wildcard masks untouched. Verify bare EIGRP `network` statements (no trailing
+wildcard) are tokenised — e.g. `network 172.16.0.0` → `network IPv4-xxxx`.
 
 **IPv6 addresses tokenised**
 All routable IPv6 addresses replaced with `IPv6-xxxx` tokens. Verify:
@@ -536,6 +553,21 @@ All routable IPv6 addresses replaced with `IPv6-xxxx` tokens. Verify:
 - `ff02::x` multicast addresses are preserved unchanged
 - CIDR prefix lengths (`/64`, `/128`) are untouched
 - The `[ipv6_address]` section appears in the mapping file
+
+**Transform sets consistent**
+`TRANSFORM-AES256-SHA` should carry the same `tset-xxxx` token on the
+`crypto ipsec transform-set` definition line and the `set transform-set` reference
+inside the crypto map.
+
+**PKI trustpoints consistent**
+`CORP-PKI-TRUSTPOINT` should carry the same `tp-xxxx` token on both the
+`crypto pki trustpoint` definition line and the `crypto pki certificate chain`
+reference line.
+
+**match address acl correctly handled**
+`match address acl ACL-NAME` lines should produce a token only for the ACL name —
+the literal keyword `acl` must remain in the output (e.g. `match address acl acl-xxxx`).
+The name must NOT be left as `acl` while the real name is dropped.
 
 **Names consistent**
 A named object (e.g. `RMAP-ACME-IN`) should carry the same `rmap-xxxx` token on

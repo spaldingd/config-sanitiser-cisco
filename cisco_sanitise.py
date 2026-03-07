@@ -28,9 +28,9 @@ Call-home      : contact-email-addr, street-address, site-id, customer-id,
 Named objects  : hostnames, domain names, usernames, VRFs, route-maps/policies,
                  policy-maps, class-maps, named ACLs, prefix-lists/sets,
                  community-lists/sets, peer-groups/neighbor-groups, keychains,
-                 crypto maps, object-groups, IP SLA IDs, track IDs, BGP
-                 templates, TACACS/RADIUS server block names,
-                 aaa group server block names
+                 crypto maps, transform sets, PKI trustpoints, object-groups,
+                 IP SLA IDs, track IDs, BGP templates, TACACS/RADIUS server
+                 block names, aaa group server block names
 Descriptions   : all free-text description lines including inline descriptions
                  on neighbor, prefix-list, and object definition lines
 
@@ -84,6 +84,8 @@ CATEGORY_PREFIXES = {
     "aaa_server":     "srv",
     "aaa_group":      "aaag",
     "crypto_map":     "cmap",
+    "transform_set":  "tset",
+    "trustpoint":     "tp",
     "keychain":       "kc",
     "track":          "trk",
     "object_group":   "og",
@@ -113,8 +115,12 @@ _ACE_LINE_RE = re.compile(
 
 # OSPF/EIGRP network statements — wildcard is the second address on the line.
 # e.g. " network 10.3.0.0 0.0.0.3 area 0" — preserve 0.0.0.3
+# Also matches bare EIGRP statements with no wildcard: " network 172.16.0.0"
+# NOTE: trailing group uses [ \t]+ (horizontal whitespace only) — \s+ would span
+# newlines and merge consecutive network lines, causing the second line's address
+# to be wrongly treated as a wildcard and skipped.
 _NETWORK_STMT_RE = re.compile(
-    r'^\s+network\s+\S+\s+.*$', re.M
+    r'^\s+network\s+\S+(?:[ \t]+.*)?$', re.M
 )
 
 # IPv6 address regex — union of all RFC 5952 compressed forms.
@@ -755,8 +761,8 @@ class CiscoSanitiser:
             r'(?P<n>(?!prefix-list\b)[A-Za-z]\S*)', re.M),
                  "acl", "match ip address ref", text)
 
-        # "match address NAME" (IOS route-map style)
-        text = N(re.compile(r'(\bmatch\s+address\s+)(?P<n>[A-Za-z]\S*)', re.M),
+        # "match address NAME" (IOS route-map style) — optional 'acl' keyword
+        text = N(re.compile(r'(\bmatch\s+address\s+(?:acl\s+)?)(?P<n>[A-Za-z]\S*)', re.M),
                  "acl", "match address ref", text)
 
         # match access-group name NAME
@@ -843,6 +849,27 @@ class CiscoSanitiser:
         # ── Crypto maps ───────────────────────────────────────────────────
         text = N(re.compile(r'^(crypto\s+map\s+)(?P<n>\S+)', re.M),
                  "crypto_map", "crypto map", text)
+
+        # ── Transform sets ────────────────────────────────────────────────
+        # Definition: crypto ipsec transform-set NAME ...
+        text = N(re.compile(
+            r'^(crypto\s+ipsec\s+transform-set\s+)(?P<n>\S+)', re.M),
+                 "transform_set", "transform-set def", text)
+
+        # Reference: set transform-set NAME (inside crypto map)
+        text = N(re.compile(r'(\bset\s+transform-set\s+)(?P<n>\S+)', re.M),
+                 "transform_set", "transform-set ref", text)
+
+        # ── PKI trustpoints ───────────────────────────────────────────────
+        # Definition: crypto pki trustpoint NAME
+        text = N(re.compile(
+            r'^(crypto\s+pki\s+trustpoint\s+)(?P<n>\S+)', re.M),
+                 "trustpoint", "pki trustpoint def", text)
+
+        # Reference: crypto pki certificate chain NAME
+        text = N(re.compile(
+            r'^(crypto\s+pki\s+certificate\s+chain\s+)(?P<n>\S+)', re.M),
+                 "trustpoint", "pki certificate chain ref", text)
 
         # ── Object groups ─────────────────────────────────────────────────
         text = N(re.compile(
