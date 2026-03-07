@@ -100,13 +100,17 @@ _SUBNET_MASK_RE = re.compile(
 )
 
 # ACL wildcard masks: the second IPv4 address on any ACE line (permit/deny)
-# These may use any octet values (e.g. 0.15.255.255) and must not be anonymised.
-# Strategy: scan each ACL line and collect spans of the wildcard (2nd address) positions.
 _IP_RE = re.compile(
     r'\b((?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b'
 )
 _ACE_LINE_RE = re.compile(
     r'^\s*(?:\d+\s+)?(?:permit|deny)\s+\S+\s+.*$', re.M
+)
+
+# OSPF/EIGRP network statements — wildcard is the second address on the line.
+# e.g. " network 10.3.0.0 0.0.0.3 area 0" — preserve 0.0.0.3
+_NETWORK_STMT_RE = re.compile(
+    r'^\s+network\s+\S+\s+.*$', re.M
 )
 
 
@@ -118,19 +122,22 @@ def _collect_skip_spans(text: str) -> set[tuple[int, int]]:
     for m in _SUBNET_MASK_RE.finditer(text):
         skip.add(m.span())
 
-    # 2. Wildcard masks in ACE lines — the second IPv4 address on permit/deny lines
+    # 2. Wildcard masks in ACE lines (permit/deny)
     #    e.g. "permit ip 10.0.0.0 0.255.255.255 any" — preserve 0.255.255.255
     #    e.g. "deny ip 172.16.0.0 0.15.255.255 any"  — preserve 0.15.255.255
     for ace in _ACE_LINE_RE.finditer(text):
         ips_in_ace = list(_IP_RE.finditer(text, ace.start(), ace.end()))
-        # Each src/dst pair: network_addr wildcard_mask — skip every even-indexed
-        # address starting from the first (index 0 = network, index 1 = wildcard)
-        # For "host X" syntax there is no wildcard, so we check pairs.
-        # Simpler and safe: skip every *second* consecutive IP found on the line.
         i = 1
         while i < len(ips_in_ace):
             skip.add(ips_in_ace[i].span())
-            i += 2   # step by 2: skip wildcard, keep next network addr, skip its wildcard…
+            i += 2
+
+    # 3. Wildcard masks in OSPF/EIGRP network statements
+    #    e.g. " network 10.3.0.0 0.0.0.3 area 0" — preserve 0.0.0.3
+    for stmt in _NETWORK_STMT_RE.finditer(text):
+        ips_in_stmt = list(_IP_RE.finditer(text, stmt.start(), stmt.end()))
+        if len(ips_in_stmt) >= 2:
+            skip.add(ips_in_stmt[1].span())
 
     return skip
 
