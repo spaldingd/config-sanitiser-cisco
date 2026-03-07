@@ -8,8 +8,7 @@
     "SNMP-ACCESS-LIST": "acl-be5f",
     "BLOCK-INBOUND-THREATS": "acl-6bba",
     "MATCH-MGMT-TRAFFIC": "acl-ad94",
-    "IPV6-BLOCK-THREATS": "acl-fe52",
-    "acl": "acl-8794"
+    "IPV6-BLOCK-THREATS": "acl-fe52"
   },
   "as_number": {
     "65001": "AS-2b08",
@@ -76,6 +75,9 @@
   },
   "crypto_map": {
     "CRYPTO-MAP-BRANCH": "cmap-324c"
+  },
+  "transform_set": {
+    "TRANSFORM-AES256-SHA": "tset-cb48"
   },
   "object_group": {
     "OG-MONITORING-SERVERS": "og-257b",
@@ -193,6 +195,7 @@
     "192.168.202.1": "IPv4-8547",
     "10.4.0.1": "IPv4-8c84",
     "10.0.0.0": "IPv4-3686",
+    "172.16.0.0": "IPv4-a47d",
     "172.16.30.0": "IPv4-ef92",
     "10.3.0.0": "IPv4-d071",
     "10.0.0.1": "IPv4-b766",
@@ -200,7 +203,6 @@
     "172.16.30.2": "IPv4-ec41",
     "172.16.100.0": "IPv4-669b",
     "172.16.101.0": "IPv4-ce7f",
-    "172.16.0.0": "IPv4-a47d",
     "192.168.0.0": "IPv4-9a59",
     "10.50.0.0": "IPv4-c102",
     "10.50.2.0": "IPv4-fc3c",
@@ -273,6 +275,9 @@
     "CMAP-VIDEO-CONFERENCING": "cmap-7758",
     "CMAP-CRITICAL-DATA": "cmap-9b03",
     "CMAP-SCAVENGER": "cmap-efcb"
+  },
+  "trustpoint": {
+    "CORP-PKI-TRUSTPOINT": "tp-89b8"
   },
   "template": {
     "TMPL-IBGP-SESSION": "tmpl-e831",
