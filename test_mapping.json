@@ -8,12 +8,16 @@
     "SNMP-ACCESS-LIST": "acl-be5f",
     "BLOCK-INBOUND-THREATS": "acl-6bba",
     "MATCH-MGMT-TRAFFIC": "acl-ad94",
+    "IPV6-BLOCK-THREATS": "acl-fe52",
     "acl": "acl-8794"
   },
   "as_number": {
     "65001": "AS-2b08",
+    "65000": "AS-d20b",
+    "65002": "AS-65fe",
+    "65003": "AS-e2b5",
     "65100": "AS-8a26",
-    "65000": "AS-d20b"
+    "65200": "AS-b2c4"
   },
   "hostname": {
     "ACCESS-ROUTER-LON-03": "host-50ed",
@@ -29,6 +33,11 @@
     "monitor": "user-35bc",
     "netops": "user-a689",
     "readonly": "user-0c86"
+  },
+  "aaa_group": {
+    "TACACS-GROUP": "aaag-e1c6",
+    "RADIUS-GROUP": "aaag-b3d0",
+    "TACACS-GROUP-XR": "aaag-cfc7"
   },
   "vrf": {
     "CUSTOMER-ACME": "vrf-a48e",
@@ -47,7 +56,9 @@
     "PFX-OWN-PREFIXES": "pfx-d439",
     "PFX-ACME-CUSTOMER": "pfx-83ff",
     "PFX-DEFAULT-ONLY": "pfx-4766",
-    "PFX-ALLOWED-IN": "pfx-64c6"
+    "PFX-IPV6-OWN": "pfx-7380",
+    "PFX-ALLOWED-IN": "pfx-64c6",
+    "PFX-IPV6-ALLOWED-IN": "pfx-18cb"
   },
   "community_list": {
     "COMM-UPSTREAM-LEARNED": "cmty-3fc3",
@@ -169,7 +180,10 @@
     "UPSTREAM-PROVIDER-B - Primary 100G Transit": "desc-e9a9",
     "CORE-ROUTER-LON-01 RR peer": "desc-4660",
     "ACME-CE-MAN-01 - Customer BGP Peer Manchester": "desc-26e5",
-    "Shape and queue outbound traffic by class": "desc-281e"
+    "Shape and queue outbound traffic by class": "desc-281e",
+    "Upstream Providers IPv6": "desc-6486",
+    "UPSTREAM-PROVIDER-B - IPv6 Transit": "desc-2a0b",
+    "CORE-ROUTER-LON-01 IPv6 iBGP": "desc-a104"
   },
   "ip_address": {
     "10.100.0.53": "IP-d575",
@@ -251,6 +265,7 @@
   },
   "neighbor_group": {
     "UPSTREAM-PEERS": "ng-77c9",
-    "INTERNAL-RR": "ng-f218"
+    "INTERNAL-RR": "ng-f218",
+    "UPSTREAM-PEERS-V6": "ng-ec9e"
   }
 }

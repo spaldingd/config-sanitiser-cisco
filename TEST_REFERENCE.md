@@ -2,6 +2,8 @@
 
 `cisco_sanitise.py` is a single unified script supporting IOS, IOS XE, and IOS XR.
 Three sample configs exercise its sanitisation rules across all three platforms.
+Each config also includes IPv6 configuration to demonstrate the current IPv6
+limitation (addresses pass through unsanitised).
 
 ---
 
@@ -37,7 +39,8 @@ mapping file.
 | SNMP community string | `snmp` | `snmp-1595` |
 | BGP peer-group | `pg` | `pg-c0b4` |
 | BGP neighbor-group (XR) | `ng` | `ng-77c9` |
-| TACACS / RADIUS server name | `srv` | `srv-ebad` |
+| TACACS / RADIUS server block name | `srv` | `srv-ebad` |
+| AAA group server block name | `aaag` | `aaag-6afb` |
 | Crypto map | `cmap` | `cmap-7d11` |
 | Keychain name | `kc` | `kc-2a55` |
 | Track object | `trk` | `trk-0e3f` |
@@ -48,8 +51,9 @@ mapping file.
 | AS number | `AS` | `AS-2b08` |
 | IPv4 host address | `IP` | `IP-b766` |
 
-Credentials are replaced with the literal `<REMOVED>` rather than a token, as they
-carry no structural meaning that needs to remain traceable.
+Credentials and sensitive free-text values are replaced with the literal `<REMOVED>`
+rather than a token, as they carry no structural meaning that needs to remain
+traceable.
 
 ---
 
@@ -59,15 +63,18 @@ The following values are never anonymised regardless of context:
 
 - **Loopback range** — the entire `127.0.0.0/8` range (`addr.is_loopback`)
 - **Special addresses** — `0.0.0.0` and `255.255.255.255` exactly
-- Note: routable IPs assigned to Loopback *interfaces* (e.g. `10.0.0.1/32`) are anonymised — the script operates on address values only, not interface names
-- **Subnet masks** — e.g. `255.255.255.0`, `255.255.0.0`
-- **Wildcard masks** — any value in the second address position of an ACE line,
-  including non-standard wildcard octets such as `0.15.255.255`
+- Note: routable IPs assigned to Loopback *interfaces* (e.g. `10.0.0.1/32`) are
+  anonymised — the script operates on address values only, not interface names
+- **Subnet masks** — any quad matching standard mask octets
+  (255/254/252/248/240/224/192/128/0)
+- **Wildcard masks** — the second address on any ACE (`permit`/`deny`) line is
+  identified by position, not by octet value, so non-standard wildcards such as
+  `0.15.255.255` are correctly left in place
 - **CIDR prefix lengths** — `/24`, `/32`, etc.
-- **Numeric ACL IDs** in SNMP community lines (e.g. `RO 10`) — only named ACLs are anonymised
+- **Numeric ACL IDs** in SNMP community lines — `RO 10` left as-is
+- **Keychain lifetime lines** — `accept-lifetime`, `send-lifetime`
 - **Cisco syntax keywords** — `permit`, `deny`, `any`, `default`, `encrypted`, etc.
-- **Timestamps and lifetimes** — `accept-lifetime`, `send-lifetime` lines
-- **Comment lines** (`!`) and config structure (indentation, blank lines)
+- **Comment lines** (`!`, `!!`) and config structure (indentation, blank lines)
 
 ---
 
@@ -81,22 +88,25 @@ previous one. All patterns prevent newline-crossing by using `[^\S\n]+` rather t
 
 ### Pass 1 — Credentials
 
-All credential values are replaced with `<REMOVED>`.
+All credential values and sensitive literal strings are replaced with `<REMOVED>`.
+
+#### Authentication credentials
 
 | Rule | Syntax matched | IOS | XE | XR |
 |------|---------------|:---:|:---:|:---:|
 | enable secret/password | `enable secret 5 $1$...` | ✓ | ✓ | — |
 | username secret/password | `username NAME secret 5 $1$...` | ✓ | ✓ | ✓ |
-| XR username secret block | ` secret 5 $1$...` (indented, inside username block) | — | — | ✓ |
-| XR username password block | ` password 7 <hash>` (indented, inside username block) | — | ✓ | ✓ |
-| Line password | ` password 7 <hash>` (under line vty/con) | ✓ | ✓ | ✓ |
+| XR username secret block | ` secret 5 $1$...` (indented) | — | — | ✓ |
+| XR username password block | ` password 7 <hash>` (indented) | — | ✓ | ✓ |
+| Line password | ` password 7 <hash>` (line vty/con) | ✓ | ✓ | ✓ |
 | OSPF message-digest-key | ` ip ospf message-digest-key 1 md5 0 <key>` | — | ✓ | — |
 | Keychain key-string (IOS/XE) | ` key-string 0 <plain>` / ` key-string 7 <hash>` | ✓ | ✓ | — |
 | Keychain key-string (XR) | ` key-string password 0 <plain>` | — | — | ✓ |
 | NTP authentication-key (IOS/XE) | `ntp authentication-key 1 md5 <key>` | ✓ | ✓ | — |
 | authentication-key md5 encrypted (XR) | ` authentication-key 1 md5 encrypted <hash>` | — | — | ✓ |
-| authentication-key (generic) | ` authentication-key 0 <key>` (OSPF/IS-IS plain-text) | ✓ | ✓ | — |
+| authentication-key (generic) | ` authentication-key 0 <key>` | ✓ | ✓ | — |
 | AAA server key (block) | ` key 7 <hash>` (inside tacacs/radius server block) | — | ✓ | ✓ |
+| AAA server-private key | ` server-private <ip> [port N] key [N] <val>` (inside aaa group server block) | ✓ | ✓ | ✓ |
 | tacacs-server key (IOS flat) | `tacacs-server host <ip> key 7 <hash>` | ✓ | — | — |
 | radius-server key (IOS flat) | `radius-server host <ip> key 7 <hash>` | ✓ | — | — |
 | BGP neighbor password | ` neighbor <x> password 7 <hash>` | ✓ | ✓ | — |
@@ -104,7 +114,33 @@ All credential values are replaced with `<REMOVED>`.
 | IKE pre-shared-key | ` pre-shared-key address <ip> <key>` | — | ✓ | — |
 | crypto isakmp key | `crypto isakmp key <key> address <ip>` | ✓ | ✓ | — |
 | tunnel key | ` tunnel key <value>` | — | ✓ | — |
-| PKI certificate block | `certificate self-signed … quit` (multiline block) | — | ✓ | — |
+| PKI certificate block | `certificate self-signed … quit` (multiline) | — | ✓ | — |
+
+#### PKI identity
+
+| Rule | Syntax matched | IOS | XE | XR |
+|------|---------------|:---:|:---:|:---:|
+| PKI enrollment url | ` enrollment url http://pki.internal.example.com` | — | ✓ | — |
+| PKI subject-name | ` subject-name CN=router.example.com,OU=Network,O=Corp` | — | ✓ | — |
+
+#### Banner body
+
+| Rule | Syntax matched | IOS | XE | XR |
+|------|---------------|:---:|:---:|:---:|
+| banner body | `banner motd ^C … ^C` — body replaced with `<REMOVED>`; delimiter lines preserved | ✓ | ✓ | ✓ |
+
+Covers `banner motd`, `banner login`, `banner exec`, and `banner incoming`.
+
+#### Call-home block
+
+| Rule | Syntax matched | IOS | XE | XR |
+|------|---------------|:---:|:---:|:---:|
+| contact-email-addr | ` contact-email-addr noc@example.com` | ✓ | ✓ | ✓ |
+| street-address | ` street-address 123 Main Street, London` | ✓ | ✓ | ✓ |
+| site-id | ` site-id SITE-LON-CORE-01` | ✓ | ✓ | ✓ |
+| customer-id | ` customer-id ACME-CORP-UK-12345` | ✓ | ✓ | ✓ |
+| phone-number | ` phone-number +442079460000` | ✓ | ✓ | ✓ |
+| contract-id | ` contract-id CON-98765432` | ✓ | ✓ | ✓ |
 
 ---
 
@@ -121,6 +157,7 @@ reference maps to the same `snmp-xxxx` token, preserving traceability.
 | SNMP community host ref | `snmp-server host <ip> version 2c <community>` | ✓ | ✓ | ✓ |
 | XR SNMP ACL ref | `RO IPv4 <acl>` / `RW IPv4 <acl>` (inside XR community block) | — | — | ✓ |
 | SNMP location | `snmp-server location <free text>` → `<REMOVED>` | ✓ | ✓ | ✓ |
+| SNMP contact | `snmp-server contact <free text>` → `<REMOVED>` | ✓ | ✓ | ✓ |
 
 ---
 
@@ -132,13 +169,16 @@ number maps to the same token across all contexts.
 | Rule | Syntax matched | IOS | XE | XR |
 |------|---------------|:---:|:---:|:---:|
 | router bgp AS | `router bgp 65001` | ✓ | ✓ | ✓ |
+| bgp confederation identifier | `bgp confederation identifier 65000` | ✓ | ✓ | ✓ |
+| bgp confederation peers | `bgp confederation peers 65002 65003` (each AS tokenised) | ✓ | ✓ | ✓ |
+| bgp local-as | `bgp local-as 65100 no-prepend replace-as` | ✓ | ✓ | ✓ |
 | remote-as | `remote-as 65001` | ✓ | ✓ | ✓ |
 | VRF rd | `rd 65001:100` | ✓ | ✓ | ✓ |
 | route-target | `route-target export 65001:100` | ✓ | ✓ | — |
 | XR route-target value | `   65001:100` (3+ space-indented bare value line) | — | — | ✓ |
 | XR community-set value | `  65001:1000` (2+ space-indented bare value line) | — | — | ✓ |
-| community permit AS:tag | `permit 65001:1000` (in community-list definition) | ✓ | ✓ | — |
-| community deny AS:tag | `deny 65001:1000` (in community-list definition) | — | — | — |
+| community permit AS:tag | `permit 65001:1000` (in community-list) | ✓ | ✓ | — |
+| community deny AS:tag | `deny 65001:1000` (in community-list) | — | — | — |
 | set community AS:tag | `set community 65001:1000` (in route-map) | — | ✓ | — |
 
 ---
@@ -173,8 +213,17 @@ removed by Pass 1.
 | tacacs server name | `tacacs server TACACS-PRIMARY` | — | ✓ | — |
 | radius server name | `radius server RADIUS-SRV-01` | — | ✓ | — |
 
-IOS uses flat `tacacs-server host` / `radius-server host` syntax — no named block,
-nothing to anonymise here beyond the key (handled in Pass 1).
+#### AAA Group Server Block Names
+
+| Rule | Syntax matched | IOS | XE | XR |
+|------|---------------|:---:|:---:|:---:|
+| aaa group server name | `aaa group server tacacs+ TACACS-GROUP` | ✓ | ✓ | ✓ |
+| aaa group ref | `aaa authentication login default group TACACS-GROUP local` | ✓ | ✓ | ✓ |
+
+The same `aaag-xxxx` token appears on the group definition line and all
+`aaa authentication` / `aaa authorization` / `aaa accounting` reference lines.
+Built-in protocol keywords (`tacacs+`, `radius`, `ldap`, `local`) are never
+captured as group names.
 
 #### VRF Names
 
@@ -198,7 +247,7 @@ Anonymised to `vrf-xxxx`. All definition and reference syntaxes are covered:
 | route-map def | `route-map RMAP-NAME permit 10` | ✓ | ✓ | — |
 | route-map ref | `neighbor x route-map RMAP-NAME in` | ✓ | ✓ | — |
 | route-policy def (XR) | `route-policy POLICY-NAME` | — | — | ✓ |
-| route-policy ref (XR) | `route-policy POLICY-NAME in` (BGP, interface) | — | — | ✓ |
+| route-policy ref (XR) | `route-policy POLICY-NAME in` | — | — | ✓ |
 
 #### QoS
 
@@ -226,10 +275,13 @@ Anonymised to `vrf-xxxx`. All definition and reference syntaxes are covered:
 
 | Rule | Syntax matched | IOS | XE | XR |
 |------|---------------|:---:|:---:|:---:|
-| prefix-list def | `ip prefix-list PFX-NAME` | ✓ | ✓ | — |
+| prefix-list def | `ip prefix-list PFX-NAME` / `ipv6 prefix-list PFX-NAME` | ✓ | ✓ | — |
 | prefix-list ref | `prefix-list PFX-NAME in` (BGP) | ✓ | ✓ | ✓ |
 | prefix-set def (XR) | `prefix-set PFX-SET-NAME` | — | — | ✓ |
 | XR destination in ref | `destination in PFX-SET-NAME` | — | — | ✓ |
+
+Note: `ipv6 prefix-list` names are tokenised but the IPv6 prefix *values* inside
+entries are not anonymised (see Known Limitations).
 
 #### Community Lists and Community Sets
 
@@ -238,7 +290,7 @@ Anonymised to `vrf-xxxx`. All definition and reference syntaxes are covered:
 | community-list def | `ip community-list standard COMM-NAME permit ...` | ✓ | ✓ | — |
 | community-list ref | `community-list COMM-NAME` (in route-map match) | ✓ | ✓ | — |
 | community-set def (XR) | `community-set COMM-SET-NAME` | — | — | ✓ |
-| XR set community ref | `set community COMM-SET-NAME` (named set ref in route-policy) | — | ✓ | ✓ |
+| XR set community ref | `set community COMM-SET-NAME` (named set ref) | — | ✓ | ✓ |
 
 #### BGP Peer-Groups and Neighbor-Groups
 
@@ -277,33 +329,28 @@ Anonymised to `vrf-xxxx`. All definition and reference syntaxes are covered:
 
 ### Pass 5 — Descriptions
 
-Description text is anonymised to `desc-xxxx` tokens. Two sub-rules cover the
-different positions where description text appears in Cisco configs:
+Description text is anonymised to `desc-xxxx` tokens.
 
 | Rule | Syntax matched | Notes |
 |------|---------------|-------|
-| Standalone description lines | `description <text>` (any indentation level) | Interface, VRF, route-map, object descriptions |
+| Standalone description lines | `description <text>` (any indentation) | Interface, VRF, route-map, object descriptions |
 | Inline description text | `… description <text>` (mid-line) | e.g. `ip prefix-list NAME description <text>`, `neighbor X description <text>` |
 
 The same description text maps to the same `desc-xxxx` token wherever it appears.
-Already-tokenised values are not re-anonymised.
 
 ---
 
 ### Pass 6 — IPv4 Addresses
 
-IPv4 host addresses are anonymised last, after all named-object and credential passes,
-to avoid interfering with pattern matching on those passes.
+IPv4 host addresses are anonymised last, after all named-object and credential passes.
 
 - **Token format** — `IP-xxxx` (4 hex chars), e.g. `IP-b766`
 - **Deterministic** — same source IP → same `IP-xxxx` token for the same seed
-- **Loopbacks preserved** — `127.0.0.0/8` range only; routable IPs on Loopback interfaces are anonymised
+- **Loopbacks preserved** — `127.0.0.0/8` range only; routable IPs on Loopback
+  interfaces are anonymised
 - **Special addresses preserved** — `0.0.0.0` and `255.255.255.255` exactly
-- **Subnet masks preserved** — any quad matching standard mask octets (255/254/252/248/240/224/192/128/0)
-- **Wildcard masks preserved** — the second address on any ACE (`permit`/`deny`) line is
-  identified by position, not by octet value, so non-standard wildcards such as
-  `0.15.255.255` are correctly left in place
-- **CIDR notation** — `/24` etc. is not an IP address and is unaffected
+- **Subnet masks preserved** — standard mask octets (255/254/252/248/240/224/192/128/0)
+- **Wildcard masks preserved** — second address on ACE lines preserved by position
 
 ---
 
@@ -321,21 +368,30 @@ to avoid interfering with pattern matching on those passes.
 | NTP/OSPF auth-key encrypted (XR) | — | — | ✓ |
 | TACACS/RADIUS block keys | — | ✓ | ✓ |
 | TACACS/RADIUS flat keys (IOS) | ✓ | — | — |
+| AAA server-private keys | ✓ | ✓ | ✓ |
 | BGP neighbor password | ✓ | ✓ | — |
 | XR BGP password (neighbor block) | ✓ | ✓ | ✓ |
 | IKE pre-shared-key | — | ✓ | — |
 | crypto isakmp key | ✓ | ✓ | — |
 | tunnel key | — | ✓ | — |
 | PKI certificate block | — | ✓ | — |
+| PKI enrollment url | — | ✓ | — |
+| PKI subject-name | — | ✓ | — |
+| Banner body | ✓ | ✓ | ✓ |
+| Call-home fields (all 6) | ✓ | ✓ | ✓ |
 | SNMP community (def + host ref + ACL) | ✓ | ✓ | ✓ |
 | SNMP location | ✓ | ✓ | ✓ |
+| SNMP contact | ✓ | ✓ | ✓ |
 | AS numbers (BGP / rd / rt) | ✓ | ✓ | ✓ |
+| BGP confederation identifier / peers | ✓ | ✓ | ✓ |
+| BGP local-as | ✓ | ✓ | ✓ |
 | Community AS:tag values | ✓ | ✓ | ✓ |
 | set community AS:tag (route-map) | — | ✓ | — |
 | Hostname | ✓ | ✓ | ✓ |
 | Domain name | ✓ | ✓ | ✓ |
 | Usernames | ✓ | ✓ | ✓ |
 | TACACS/RADIUS server block names | — | ✓ | — |
+| AAA group server block names + refs | ✓ | ✓ | ✓ |
 | VRF (all syntax variants) | ✓ | ✓ | ✓ |
 | Route-maps (IOS/XE) | ✓ | ✓ | — |
 | Route-policies (XR) | — | — | ✓ |
@@ -356,6 +412,24 @@ to avoid interfering with pattern matching on those passes.
 | BGP templates | — | ✓ | — |
 | Descriptions (standalone + inline) | ✓ | ✓ | ✓ |
 | IPv4 host addresses | ✓ | ✓ | ✓ |
+| IPv6 addresses (NOT sanitised) | ✗ | ✗ | ✗ |
+
+---
+
+## Known Limitations
+
+The following items are not currently sanitised. The test configs include examples
+of each so that future fixes can be verified by re-running the test suite.
+
+| Item | Detail | Test config |
+|------|--------|-------------|
+| **IPv6 host addresses** | All IPv6 addresses pass through unchanged — `2001:db8:...`, `FE80::`, `::` etc. BGP neighbour *passwords* on IPv6 sessions are correctly removed; only the addresses are not tokenised. Highest-priority outstanding item for dual-stack deployments. | All three |
+| **IPv6 ACL entries** | `deny ipv6 2001:db8:bad::/48 any` — IPv6 prefixes in ACL entries not anonymised | `sample_ios`, `sample_iosxe` |
+| **IPv6 prefix-list / prefix-set values** | Prefix *names* are tokenised; the IPv6 prefix values inside entries are not | All three |
+| **IPv6 static route next-hops** | `ipv6 route ::/0 2001:db8::1` — next-hop address not anonymised | `sample_ios`, `sample_iosxe` |
+| **IPv6 BGP neighbour addresses** | `neighbor 2001:db8::1 remote-as ...` — address not anonymised (password is removed) | All three |
+| **`archive path` naming convention** | Server IP is anonymised by the IP pass; the path template (e.g. `/configs/$h-$t`) reveals the device naming convention | — |
+| **Hostnames embedded in descriptions** | If a real hostname appears inside a description string, the whole description is tokenised (good) but the mapping file retains the original, which contains the hostname | — |
 
 ---
 
@@ -363,10 +437,10 @@ to avoid interfering with pattern matching on those passes.
 
 | Rule | Syntax | Notes |
 |------|--------|-------|
-| `authentication-key` (generic) | ` authentication-key 0 <key>` (no md5) | No IS-IS / OSPF plain-text auth in test configs |
+| `authentication-key` (generic) | ` authentication-key 0 <key>` (no md5) | No plain-text IS-IS / OSPF auth in test configs |
 | `community deny AS:tag` | `deny 65001:1000` in community-list | All test community entries use `permit` |
-| `group-object ref` | `group-object OG-NAME` | Object-group nesting not present in test configs |
-| `track ref` | Inline `track N` references | Track objects are defined but not referenced inline |
+| `group-object ref` | `group-object OG-NAME` | Object-group nesting not present |
+| `track ref` | Inline `track N` references | Track objects defined but not referenced inline |
 
 ---
 
@@ -402,33 +476,46 @@ python cisco_sanitise.py \
 Search the output for `$1$`, `$5$`, `password 7`, `key 7`, `key 0`, `secret`.
 None should retain a real value — all should show `<REMOVED>`.
 
+**Server-private keys removed**
+Check `aaa group server` blocks — `server-private <ip> key 7 <hash>` lines should
+show `<REMOVED>` for the key value.
+
+**PKI identity removed**
+`enrollment url` and `subject-name` lines should show `<REMOVED>`.
+
+**Banner body removed**
+`banner motd` blocks should retain their delimiter lines (`^C`) with `<REMOVED>`
+replacing the body text between them.
+
+**Call-home fields removed**
+All six call-home sensitive fields should show `<REMOVED>`.
+
+**SNMP contact removed**
+`snmp-server contact` should show `<REMOVED>`.
+
 **SNMP community consistent**
-The same community string (e.g. `PUBLIC-READ`) should produce the same `snmp-xxxx`
-token on both the `snmp-server community` definition line and any `snmp-server host`
-reference line. Cross-check via the mapping file.
+The same community string should produce the same `snmp-xxxx` token on both the
+definition line and any `snmp-server host` reference line.
 
 **AS numbers tokenised**
-`65001` should map to the same `AS-xxxx` token whether it appears in `router bgp`,
-`remote-as`, `rd`, `route-target`, or a community value line.
+`65001` should map to the same `AS-xxxx` token in `router bgp`, `remote-as`, `rd`,
+`route-target`, `confederation identifier`, `confederation peers`, and `local-as`.
+
+**AAA group names consistent**
+`TACACS-GROUP` should carry the same `aaag-xxxx` token on the `aaa group server`
+definition line and all `aaa authentication` / `aaa authorization` reference lines.
 
 **IP addresses tokenised**
-All host addresses not in the preserve list should be replaced with `IP-xxxx` tokens.
-The same source IP should produce the same `IP-xxxx` token throughout the file.
-Only `127.0.0.0/8`, `0.0.0.0`, and `255.255.255.255` are preserved — routable IPs
-on Loopback interfaces are tokenised like any other address. Subnet
-masks (e.g. `255.255.255.0`) and wildcard masks (e.g. `0.15.255.255`) are untouched.
+All non-loopback host addresses replaced with `IP-xxxx` tokens. Subnet masks and
+wildcard masks untouched.
+
+**IPv6 addresses NOT tokenised** (expected)
+All `2001:db8:...`, `FE80::`, `::` addresses should pass through unchanged. This
+confirms the known limitation is correctly documented and demonstrated.
 
 **Names consistent**
-A named object (e.g. `RMAP-ACME-IN`) should carry the same `rmap-xxxx` token on its
-definition line and every reference (BGP neighbor, redistribution, etc.).
-
-**Descriptions anonymised**
-All `description` lines should show `desc-xxxx` tokens, including inline descriptions
-on `ip prefix-list` and `neighbor` lines.
-
-**accept-lifetime / send-lifetime intact**
-These keychain lifetime lines must not be modified. Confirm they appear verbatim in
-the sanitised `sample_iosxr.cfg` output.
+A named object (e.g. `RMAP-ACME-IN`) should carry the same `rmap-xxxx` token on
+its definition line and every reference.
 
 **Config structure intact**
 The sanitised file should remain syntactically valid — correct indentation, `!`

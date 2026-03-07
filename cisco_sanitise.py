@@ -7,19 +7,27 @@ What it sanitises
 ─────────────────
 Credentials    : enable secret/password, username secrets, type-5/7 hashes,
                  line passwords, OSPF/EIGRP/IS-IS auth keys, key-chain
-                 key-strings, TACACS+/RADIUS keys, IKE pre-shared-keys,
-                 BGP neighbour passwords, NTP auth keys, PKI cert blocks
-IP addresses   : all IPv4 host addresses → consistent IP_xxxx tokens,
+                 key-strings, TACACS+/RADIUS keys (block and flat style,
+                 including server-private keys in aaa group server blocks),
+                 IKE pre-shared-keys, BGP neighbour passwords, NTP auth keys,
+                 PKI cert blocks, PKI enrollment URL and subject-name
+IP addresses   : all IPv4 host addresses → consistent IP-xxxx tokens,
                  subnet masks / wildcard masks / CIDR prefixes left unchanged
 AS numbers     : router bgp, neighbor remote-as, VRF rd / route-targets,
-                 community-list value lines — consistent AS-xxxx tokens
+                 community-list value lines, bgp confederation identifier/peers,
+                 bgp local-as — consistent AS-xxxx tokens
 SNMP           : community strings → consistent tokens (traceable across config),
-                 snmp-server host community references, SNMP location
+                 snmp-server host community references, SNMP location,
+                 snmp-server contact
+Banners        : banner motd / login / exec body text → <REMOVED>
+Call-home      : contact-email-addr, street-address, site-id, customer-id,
+                 phone-number, contract-id — all → <REMOVED>
 Named objects  : hostnames, domain names, usernames, VRFs, route-maps/policies,
                  policy-maps, class-maps, named ACLs, prefix-lists/sets,
                  community-lists/sets, peer-groups/neighbor-groups, keychains,
                  crypto maps, object-groups, IP SLA IDs, track IDs, BGP
-                 templates, TACACS/RADIUS server block names
+                 templates, TACACS/RADIUS server block names,
+                 aaa group server block names
 Descriptions   : all free-text description lines including inline descriptions
                  on neighbor, prefix-list, and object definition lines
 
@@ -71,6 +79,7 @@ CATEGORY_PREFIXES = {
     "peer_group":     "pg",
     "neighbor_group": "ng",
     "aaa_server":     "srv",
+    "aaa_group":      "aaag",
     "crypto_map":     "cmap",
     "keychain":       "kc",
     "track":          "trk",
@@ -389,6 +398,39 @@ class CiscoSanitiser:
             re.M | re.DOTALL),
             ' certificate <REMOVED>\n  quit', text, "PKI certificate block")
 
+        # PKI trustpoint: enrollment url
+        text = S(re.compile(r'^(\s*enrollment\s+url\s+)\S+', re.M),
+            r'\1<REMOVED>', text, "PKI enrollment url")
+
+        # PKI trustpoint: subject-name (free text, rest of line)
+        text = S(re.compile(r'^(\s*subject-name\s+).+$', re.M),
+            r'\1<REMOVED>', text, "PKI subject-name")
+
+        # server-private key inside aaa group server blocks
+        # e.g. " server-private 10.x.x.x [port N] key [N] <val>"
+        text = S(re.compile(
+            r'^(\s+server-private\s+\S+(?:\s+(?:auth-port|acct-port|port|timeout)\s+\d+)*'
+            r'\s+key[^\S\n]+(?:\d+[^\S\n]+)?)\S+', re.M),
+            r'\1<REMOVED>', text, "AAA server-private key")
+
+        # banner body text (motd / login / exec / incoming)
+        # Cisco banners: "banner WORD DELIM\n...body...\nDELIM"
+        # The delimiter is the token immediately after the banner keyword (e.g. ^C, #, %)
+        # Use a backreference to match the closing delimiter on its own line.
+        def _redact_banner(m: re.Match) -> str:
+            return m.group(1) + '<REMOVED>' + m.group(4)
+        text = S(re.compile(
+            r'^(banner\s+\w+\s+(\S+)\n)(.*?)(\n\2\s*$)',
+            re.M | re.DOTALL),
+            _redact_banner, text, "banner body")
+
+        # call-home sensitive fields
+        for kw in ('contact-email-addr', 'street-address', 'site-id',
+                   'customer-id', 'phone-number', 'contract-id'):
+            text = S(re.compile(
+                rf'^(\s*{re.escape(kw)}\s+).+$', re.M),
+                r'\1<REMOVED>', text, f"call-home {kw}")
+
         return text
 
     # ──────────────────────────────── pass 2: SNMP ───────────────────────
@@ -426,6 +468,10 @@ class CiscoSanitiser:
         text = S(re.compile(r'^(snmp-server\s+location\s+).+$', re.M),
             r'\1<REMOVED>', text, "SNMP location")
 
+        # SNMP contact — redact free text (may be quoted)
+        text = S(re.compile(r'^(snmp-server\s+contact\s+).+$', re.M),
+            r'\1<REMOVED>', text, "SNMP contact")
+
         return text
 
     # ──────────────────────────────── pass 3: AS numbers ─────────────────
@@ -444,6 +490,28 @@ class CiscoSanitiser:
         text = self._sub(
             re.compile(r'^(router\s+bgp\s+)(\d+(?:\.\d+)?)', re.M),
             replace_as, text, "router bgp AS")
+
+        # bgp confederation identifier <AS>
+        text = self._sub(
+            re.compile(r'^(\s*bgp\s+confederation\s+identifier\s+)(\d+(?:\.\d+)?)', re.M),
+            replace_as, text, "bgp confederation identifier")
+
+        # bgp confederation peers <AS> [<AS> ...]  — replace each AS on the line
+        def replace_confederation_peers(m: re.Match) -> str:
+            prefix = m.group(1)
+            peers = re.sub(
+                r'\d+(?:\.\d+)?',
+                lambda a: self.tokens.get("as_number", a.group(0)),
+                m.group(2))
+            return prefix + peers
+        text = self._sub(
+            re.compile(r'^(\s*bgp\s+confederation\s+peers\s+)(.+)$', re.M),
+            replace_confederation_peers, text, "bgp confederation peers")
+
+        # bgp local-as <AS> [no-prepend [replace-as [dual-as]]]
+        text = self._sub(
+            re.compile(r'^(\s*bgp\s+local-as\s+)(\d+(?:\.\d+)?)', re.M),
+            replace_as, text, "bgp local-as")
 
         # neighbor … remote-as <AS>
         text = self._sub(
@@ -521,6 +589,19 @@ class CiscoSanitiser:
 
         text = N(re.compile(r'^(radius\s+server\s+)(?P<n>\S+)', re.M),
                  "aaa_server", "radius server name", text)
+
+        # ── AAA group block names ──────────────────────────────────────────
+        # "aaa group server tacacs+ NAME" / "aaa group server radius NAME"
+        text = N(re.compile(
+            r'^(aaa\s+group\s+server\s+\S+\s+)(?P<n>\S+)', re.M),
+                 "aaa_group", "aaa group server name", text)
+
+        # References in aaa authentication/authorization/accounting lines
+        # e.g. "aaa authentication login default group NAME local"
+        text = N(re.compile(
+            r'(\baaa\s+(?:authentication|authorization|accounting)\s+\S+\s+\S+\s+group\s+)'
+            r'(?P<n>(?!tacacs\+?\b|radius\b|ldap\b|local\b)\S+)', re.M),
+                 "aaa_group", "aaa group ref", text)
 
         # ── VRF ───────────────────────────────────────────────────────────
         # Definitions — most specific first to avoid keyword capture

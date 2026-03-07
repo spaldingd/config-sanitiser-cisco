@@ -9,19 +9,29 @@ without exposing credentials, internal addressing, or network topology.
 ## Features
 
 - **Credentials redacted** — enable secrets, username passwords, line passwords,
-  OSPF/IS-IS/EIGRP auth keys, key-chain key-strings, TACACS+/RADIUS keys, BGP
-  neighbour passwords, IKE pre-shared keys, NTP auth keys, PKI certificate blocks
+  OSPF/IS-IS/EIGRP auth keys, key-chain key-strings, TACACS+/RADIUS keys (block,
+  flat, and `server-private` inside `aaa group server` blocks), BGP neighbour
+  passwords, IKE pre-shared keys, NTP auth keys, PKI certificate blocks,
+  PKI `enrollment url` and `subject-name`
 - **IPv4 addresses tokenised** — host addresses replaced with consistent `IP-xxxx`
   tokens; subnet masks, wildcard masks (including non-standard octets such as
   `0.15.255.255`), and CIDR prefixes are left unchanged
 - **AS numbers tokenised** — BGP process, `remote-as`, VRF `rd`, `route-target`,
-  and community value lines all replaced with consistent `AS-xxxx` tokens
+  community value lines, `bgp confederation identifier`, `bgp confederation peers`,
+  and `bgp local-as` all replaced with consistent `AS-xxxx` tokens
 - **SNMP community strings tokenised** — not just redacted, so `snmp-server community`
-  definitions and `snmp-server host` references carry the same `snmp-xxxx` token
+  definitions and `snmp-server host` references carry the same `snmp-xxxx` token;
+  `snmp-server location` and `snmp-server contact` are redacted
+- **Banner body redacted** — `banner motd`, `banner login`, and `banner exec` body
+  text replaced with `<REMOVED>` while preserving the delimiter structure
+- **Call-home fields redacted** — `contact-email-addr`, `street-address`, `site-id`,
+  `customer-id`, `phone-number`, and `contract-id` all replaced with `<REMOVED>`
 - **Named objects tokenised** — hostnames, usernames, domain names, VRFs,
   route-maps/policies, policy-maps, class-maps, named ACLs, prefix-lists/sets,
   community-lists/sets, peer-groups, neighbor-groups, keychains, crypto maps,
-  object-groups, IP SLA IDs, track IDs, BGP templates, and AAA server block names
+  object-groups, IP SLA IDs, track IDs, BGP templates, TACACS/RADIUS server block
+  names, and `aaa group server` block names (with references in `aaa authentication`
+  / `aaa authorization` / `aaa accounting` lines)
 - **Descriptions anonymised** — all `description` text replaced with `desc-xxxx`
   tokens, including inline descriptions on `neighbor` and `prefix-list` lines
 - **Deterministic** — the same seed always produces the same tokens, so outputs are
@@ -93,9 +103,11 @@ python cisco_sanitise.py -i ./configs/ -o ./sanitised/ --no-ips --no-description
 The script runs six sequential passes over each config file:
 
 1. **Credentials** — pattern-matches credential lines for all IOS/XE/XR variants
-   and replaces values with `<REMOVED>`
-2. **SNMP** — tokenises community strings and redacts the location string
-3. **AS numbers** — replaces BGP AS numbers and community values with `AS-xxxx` tokens
+   and replaces values with `<REMOVED>`; also covers PKI enrollment URLs,
+   `server-private` keys, banner body text, and call-home sensitive fields
+2. **SNMP** — tokenises community strings; redacts location and contact strings
+3. **AS numbers** — replaces BGP AS numbers and community values with `AS-xxxx` tokens,
+   including confederation and local-as
 4. **Named objects** — replaces all named configuration objects with deterministic
    `prefix-xxxx` tokens (see Token Reference below)
 5. **Descriptions** — replaces all description text with `desc-xxxx` tokens
@@ -127,6 +139,7 @@ token in all ten places in the output.
 | BGP peer-group | `pg-xxxx` | `pg-c0b4` |
 | BGP neighbor-group (XR) | `ng-xxxx` | `ng-77c9` |
 | TACACS / RADIUS server name | `srv-xxxx` | `srv-ebad` |
+| AAA group server name | `aaag-xxxx` | `aaag-6afb` |
 | Crypto map | `cmap-xxxx` | `cmap-7d11` |
 | Keychain | `kc-xxxx` | `kc-2a55` |
 | Track object | `trk-xxxx` | `trk-0e3f` |
@@ -136,7 +149,7 @@ token in all ten places in the output.
 | Description text | `desc-xxxx` | `desc-9dee` |
 | AS number | `AS-xxxx` | `AS-2b08` |
 | IPv4 host address | `IP-xxxx` | `IP-b766` |
-| Credentials | `<REMOVED>` | — |
+| Credentials / sensitive strings | `<REMOVED>` | — |
 
 ---
 
@@ -146,12 +159,14 @@ token in all ten places in the output.
 - Wildcard masks — any value in the second address position of an ACE line,
   regardless of octet values
 - CIDR prefix lengths — `/24`, `/32`, etc.
-- **Loopback range** — the entire `127.0.0.0/8` range; note that a routable IP assigned to a Loopback *interface* (e.g. `10.0.0.1`) is **not** preserved — the script has no awareness of interface names, only address values
+- **Loopback range** — the entire `127.0.0.0/8` range; note that a routable IP
+  assigned to a Loopback *interface* (e.g. `10.0.0.1`) is **not** preserved —
+  the script has no awareness of interface names, only address values
 - **Special addresses** — `0.0.0.0` and `255.255.255.255` exactly
 - Numeric ACL IDs in SNMP community lines — `RO 10` is left as `RO 10`
 - Keychain lifetime lines — `accept-lifetime`, `send-lifetime`
 - Cisco syntax keywords — `permit`, `deny`, `any`, `default`, `encrypted`, etc.
-- Comment lines (`!`) and all config structure
+- Comment lines (`!`, `!!`) and all config structure
 
 ---
 
@@ -166,8 +181,16 @@ interface Loopback0
  description Management Loopback
 !
 router bgp 65001
+ bgp confederation identifier 65000
+ bgp local-as 65100 no-prepend replace-as
  neighbor 10.0.0.2 remote-as 65002
  neighbor 10.0.0.2 password 7 060506324F41584B56
+!
+snmp-server contact "noc@acmecorp.com"
+!
+call-home
+ contact-email-addr noc@acmecorp.com
+ site-id SITE-LON-CORE-01
 ```
 
 **After** (`--seed myproject`):
@@ -179,13 +202,17 @@ interface Loopback0
  description desc-a19c
 !
 router bgp AS-d55c
+ bgp confederation identifier AS-9f01
+ bgp local-as AS-4e7a no-prepend replace-as
  neighbor IP-d8e3 remote-as AS-50cc
  neighbor IP-d8e3 password 7 <REMOVED>
+!
+snmp-server contact <REMOVED>
+!
+call-home
+ contact-email-addr <REMOVED>
+ site-id <REMOVED>
 ```
-
-Note that `10.0.0.1` is tokenised even though it is assigned to a Loopback interface.
-The script has no awareness of interface names — it anonymises all host addresses
-that are not in the explicit preserve list (see [What Is Never Modified](#what-is-never-modified)).
 
 ---
 
@@ -196,10 +223,11 @@ grouped by category. Use this to reverse-look up any token in the sanitised outp
 
 ```json
 {
-  "hostname": { "CORE-ROUTER-LON-01": "host-4c2a" },
-  "as_number": { "65001": "AS-2b08", "65002": "AS-9d1c" },
-  "ip_address": { "10.0.0.2": "IP-b766" },
-  "vrf":        { "CUSTOMER-ACME": "vrf-a48e" }
+  "hostname":    { "CORE-ROUTER-LON-01": "host-7882" },
+  "as_number":   { "65001": "AS-d55c", "65002": "AS-50cc", "65000": "AS-9f01", "65100": "AS-4e7a" },
+  "ip_address":  { "10.0.0.1": "IP-93fc", "10.0.0.2": "IP-d8e3" },
+  "vrf":         { "CUSTOMER-ACME": "vrf-a48e" },
+  "aaa_group":   { "TACACS-GROUP": "aaag-6afb" }
 }
 ```
 
@@ -210,8 +238,15 @@ grouped by category. Use this to reverse-look up any token in the sanitised outp
 | Feature area | IOS | IOS XE | IOS XR |
 |-------------|:---:|:------:|:------:|
 | Credentials (all types) | ✓ | ✓ | ✓ |
+| server-private keys (aaa group server) | ✓ | ✓ | ✓ |
+| PKI enrollment url / subject-name | — | ✓ | — |
+| Banner body text | ✓ | ✓ | ✓ |
+| Call-home sensitive fields | ✓ | ✓ | ✓ |
 | SNMP community + host refs | ✓ | ✓ | ✓ |
+| SNMP location + contact | ✓ | ✓ | ✓ |
 | AS numbers + community values | ✓ | ✓ | ✓ |
+| BGP confederation identifier / peers | ✓ | ✓ | ✓ |
+| BGP local-as | ✓ | ✓ | ✓ |
 | Hostname / domain / usernames | ✓ | ✓ | ✓ |
 | VRF (all syntax variants) | ✓ | ✓ | ✓ |
 | Route-maps (IOS/XE syntax) | ✓ | ✓ | — |
@@ -228,26 +263,36 @@ grouped by category. Use this to reverse-look up any token in the sanitised outp
 | Keychains | ✓ | ✓ | ✓ |
 | Crypto maps / IKE PSK | ✓ | ✓ | — |
 | Object-groups / IP SLA / Track | ✓ | ✓ | — |
-| TACACS/RADIUS server names | — | ✓ | — |
+| TACACS/RADIUS server block names | — | ✓ | — |
+| AAA group server block names + refs | ✓ | ✓ | ✓ |
 | Descriptions (all positions) | ✓ | ✓ | ✓ |
 | IPv4 host addresses | ✓ | ✓ | ✓ |
 
 ---
 
-## Limitations
+## Known Limitations
 
-- **IPv6 addresses** are not anonymised
-- **Hostnames in banners** (`banner motd`, `banner login`) are not anonymised
-- **SNMP contact** (`snmp-server contact`) is not anonymised
-- **No IOS XR AAA server names** — XR uses a different AAA model not covered
-- Configs must be readable UTF-8 text; binary or encrypted exports are not supported
+The following items are **not currently sanitised**. They are demonstrated in the
+test configs so future work can be verified.
+
+| Item | Detail |
+|------|--------|
+| **IPv6 addresses** | No IPv6 address anonymisation. All `2001:db8:...`, `FE80::`, `::` addresses pass through unchanged. BGP neighbour *passwords* on IPv6 sessions are still removed; only the addresses themselves are not tokenised. This is the highest-priority outstanding item for dual-stack deployments. |
+| **IPv6 ACL content** | `deny ipv6 2001:db8::/48 any` — the IPv6 prefixes in ACL entries are not anonymised. |
+| **IPv6 prefix-list / prefix-set entries** | Prefix values inside `ipv6 prefix-list` and XR `prefix-set` blocks are not anonymised. |
+| **IPv6 static routes** | `ipv6 route ::/0 2001:db8::1` — next-hop address not anonymised. |
+| **`snmp-server contact` on IOS XR** | XR uses an identical syntax and is handled, but the XR `snmp-server contact` is inside a block context in some versions. Verify against your XR release. |
+| **Hostnames in `description` lines** | If a hostname (e.g. `CORE-ROUTER-LON-01`) appears literally inside a description string, the description token replaces the whole string but the original is visible in the mapping file. |
+| **`archive path` naming conventions** | The TFTP/FTP server IP is anonymised by the IP pass, but the path template (e.g. `/configs/$h-$t`) reveals the naming convention. |
+| **IOS XR `snmp-server contact` block syntax** | Some XR versions nest `contact` inside an `snmp-server` block. The current pattern matches the flat `snmp-server contact` form only. |
 
 ---
 
 ## Testing
 
 Three sample configs are included in `test_configs/` to verify coverage across all
-three platforms. See `test_configs/TEST_REFERENCE.md` for the full rule coverage
+three platforms. Each config includes IPv6 configuration to demonstrate the current
+IPv6 limitation. See `test_configs/TEST_REFERENCE.md` for the full rule coverage
 matrix and verification checklist.
 
 ```bash
