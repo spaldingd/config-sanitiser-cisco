@@ -57,8 +57,9 @@ carry no structural meaning that needs to remain traceable.
 
 The following values are never anonymised regardless of context:
 
-- **Loopback addresses** — `127.0.0.0/8`
-- **Special addresses** — `0.0.0.0`, `255.255.255.255`
+- **Loopback range** — the entire `127.0.0.0/8` range (`addr.is_loopback`)
+- **Special addresses** — `0.0.0.0` and `255.255.255.255` exactly
+- Note: routable IPs assigned to Loopback *interfaces* (e.g. `10.0.0.1/32`) are anonymised — the script operates on address values only, not interface names
 - **Subnet masks** — e.g. `255.255.255.0`, `255.255.0.0`
 - **Wildcard masks** — any value in the second address position of an ACE line,
   including non-standard wildcard octets such as `0.15.255.255`
@@ -296,7 +297,8 @@ to avoid interfering with pattern matching on those passes.
 
 - **Token format** — `IP-xxxx` (4 hex chars), e.g. `IP-b766`
 - **Deterministic** — same source IP → same `IP-xxxx` token for the same seed
-- **Loopbacks preserved** — `127.x.x.x`, `0.0.0.0`, `255.255.255.255` are never replaced
+- **Loopbacks preserved** — `127.0.0.0/8` range only; routable IPs on Loopback interfaces are anonymised
+- **Special addresses preserved** — `0.0.0.0` and `255.255.255.255` exactly
 - **Subnet masks preserved** — any quad matching standard mask octets (255/254/252/248/240/224/192/128/0)
 - **Wildcard masks preserved** — the second address on any ACE (`permit`/`deny`) line is
   identified by position, not by octet value, so non-standard wildcards such as
@@ -410,10 +412,11 @@ reference line. Cross-check via the mapping file.
 `remote-as`, `rd`, `route-target`, or a community value line.
 
 **IP addresses tokenised**
-All non-loopback host addresses should be replaced with `IP-xxxx` tokens. The same
-source IP should produce the same `IP-xxxx` token throughout the file. Confirm that
-subnet masks (e.g. `255.255.255.0`) and wildcard masks (e.g. `0.15.255.255`) are
-untouched.
+All host addresses not in the preserve list should be replaced with `IP-xxxx` tokens.
+The same source IP should produce the same `IP-xxxx` token throughout the file.
+Only `127.0.0.0/8`, `0.0.0.0`, and `255.255.255.255` are preserved — routable IPs
+on Loopback interfaces are tokenised like any other address. Subnet
+masks (e.g. `255.255.255.0`) and wildcard masks (e.g. `0.15.255.255`) are untouched.
 
 **Names consistent**
 A named object (e.g. `RMAP-ACME-IN`) should carry the same `rmap-xxxx` token on its

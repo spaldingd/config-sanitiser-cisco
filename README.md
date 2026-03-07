@@ -146,7 +146,8 @@ token in all ten places in the output.
 - Wildcard masks — any value in the second address position of an ACE line,
   regardless of octet values
 - CIDR prefix lengths — `/24`, `/32`, etc.
-- Loopback and special addresses — `127.x.x.x`, `0.0.0.0`, `255.255.255.255`
+- **Loopback range** — the entire `127.0.0.0/8` range; note that a routable IP assigned to a Loopback *interface* (e.g. `10.0.0.1`) is **not** preserved — the script has no awareness of interface names, only address values
+- **Special addresses** — `0.0.0.0` and `255.255.255.255` exactly
 - Numeric ACL IDs in SNMP community lines — `RO 10` is left as `RO 10`
 - Keychain lifetime lines — `accept-lifetime`, `send-lifetime`
 - Cisco syntax keywords — `permit`, `deny`, `any`, `default`, `encrypted`, etc.
@@ -171,16 +172,20 @@ router bgp 65001
 
 **After** (`--seed myproject`):
 ```
-hostname host-4c2a
+hostname host-7882
 !
 interface Loopback0
- ip address 127.0.0.1 255.255.255.255
- description desc-7f3e
+ ip address IP-93fc 255.255.255.255
+ description desc-a19c
 !
-router bgp AS-2b08
- neighbor IP-b766 remote-as AS-9d1c
- neighbor IP-b766 password 7 <REMOVED>
+router bgp AS-d55c
+ neighbor IP-d8e3 remote-as AS-50cc
+ neighbor IP-d8e3 password 7 <REMOVED>
 ```
+
+Note that `10.0.0.1` is tokenised even though it is assigned to a Loopback interface.
+The script has no awareness of interface names — it anonymises all host addresses
+that are not in the explicit preserve list (see [What Is Never Modified](#what-is-never-modified)).
 
 ---
 
