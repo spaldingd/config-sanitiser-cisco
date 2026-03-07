@@ -13,9 +13,12 @@ without exposing credentials, internal addressing, or network topology.
   flat, and `server-private` inside `aaa group server` blocks), BGP neighbour
   passwords, IKE pre-shared keys, NTP auth keys, PKI certificate blocks,
   PKI `enrollment url` and `subject-name`
-- **IPv4 addresses tokenised** — host addresses replaced with consistent `IP-xxxx`
+- **IPv4 addresses tokenised** — host addresses replaced with consistent `IPv4-xxxx`
   tokens; subnet masks, wildcard masks (including non-standard octets such as
   `0.15.255.255`), and CIDR prefixes are left unchanged
+- **IPv6 addresses tokenised** — host addresses replaced with consistent `IPv6-xxxx`
+  tokens; link-local (`fe80::/10`), loopback (`::1`), multicast (`ff00::/8`), and
+  unspecified (`::`) addresses are preserved; CIDR prefix lengths are left unchanged
 - **AS numbers tokenised** — BGP process, `remote-as`, VRF `rd`, `route-target`,
   community value lines, `bgp confederation identifier`, `bgp confederation peers`,
   and `bgp local-as` all replaced with consistent `AS-xxxx` tokens
@@ -111,8 +114,11 @@ The script runs six sequential passes over each config file:
 4. **Named objects** — replaces all named configuration objects with deterministic
    `prefix-xxxx` tokens (see Token Reference below)
 5. **Descriptions** — replaces all description text with `desc-xxxx` tokens
-6. **IPv4 addresses** — replaces host addresses with `IP-xxxx` tokens as a final pass,
-   after all structural patterns have been matched
+6. **IPv4 addresses** — replaces host addresses with `IPv4-xxxx` tokens
+7. **IPv6 addresses** — replaces host addresses with `IPv6-xxxx` tokens;
+   link-local, loopback, multicast, and unspecified addresses are preserved;
+   no skip-span logic is needed as IPv6 uses CIDR notation rather than
+   separate wildcard address fields
 
 Each token is derived from a SHA-256 hash of `seed:category:original_value`, so the
 same value always maps to the same token within a run, and across runs using the same
@@ -148,7 +154,8 @@ token in all ten places in the output.
 | BGP template | `tmpl-xxxx` | `tmpl-cc8a` |
 | Description text | `desc-xxxx` | `desc-9dee` |
 | AS number | `AS-xxxx` | `AS-2b08` |
-| IPv4 host address | `IP-xxxx` | `IP-b766` |
+| IPv4 host address | `IPv4-xxxx` | `IPv4-b766` |
+| IPv6 host address | `IPv6-xxxx` | `IPv6-3a7f` |
 | Credentials / sensitive strings | `<REMOVED>` | — |
 
 ---
@@ -178,6 +185,7 @@ hostname CORE-ROUTER-LON-01
 !
 interface Loopback0
  ip address 10.0.0.1 255.255.255.255
+ ipv6 address 2001:db8:1:100::1/128
  description Management Loopback
 !
 router bgp 65001
@@ -185,6 +193,8 @@ router bgp 65001
  bgp local-as 65100 no-prepend replace-as
  neighbor 10.0.0.2 remote-as 65002
  neighbor 10.0.0.2 password 7 060506324F41584B56
+ neighbor 2001:db8:1:3::1 remote-as 65002
+ neighbor 2001:db8:1:3::1 password 7 060506324F41584B56
 !
 snmp-server contact "noc@acmecorp.com"
 !
@@ -198,14 +208,17 @@ call-home
 hostname host-7882
 !
 interface Loopback0
- ip address IP-93fc 255.255.255.255
+ ip address IPv4-93fc 255.255.255.255
+ ipv6 address IPv6-4190/128
  description desc-a19c
 !
 router bgp AS-d55c
  bgp confederation identifier AS-9f01
  bgp local-as AS-4e7a no-prepend replace-as
- neighbor IP-d8e3 remote-as AS-50cc
- neighbor IP-d8e3 password 7 <REMOVED>
+ neighbor IPv4-d8e3 remote-as AS-50cc
+ neighbor IPv4-d8e3 password 7 <REMOVED>
+ neighbor IPv6-78db remote-as AS-50cc
+ neighbor IPv6-78db password 7 <REMOVED>
 !
 snmp-server contact <REMOVED>
 !
@@ -223,11 +236,12 @@ grouped by category. Use this to reverse-look up any token in the sanitised outp
 
 ```json
 {
-  "hostname":    { "CORE-ROUTER-LON-01": "host-7882" },
-  "as_number":   { "65001": "AS-d55c", "65002": "AS-50cc", "65000": "AS-9f01", "65100": "AS-4e7a" },
-  "ip_address":  { "10.0.0.1": "IP-93fc", "10.0.0.2": "IP-d8e3" },
-  "vrf":         { "CUSTOMER-ACME": "vrf-a48e" },
-  "aaa_group":   { "TACACS-GROUP": "aaag-6afb" }
+  "hostname":      { "CORE-ROUTER-LON-01": "host-7882" },
+  "as_number":     { "65001": "AS-d55c", "65002": "AS-50cc", "65000": "AS-9f01", "65100": "AS-4e7a" },
+  "ip_address":    { "10.0.0.1": "IPv4-93fc", "10.0.0.2": "IPv4-d8e3" },
+  "ipv6_address":  { "2001:db8:1:100::1": "IPv6-4190", "2001:db8:1:3::1": "IPv6-78db" },
+  "vrf":           { "CUSTOMER-ACME": "vrf-a48e" },
+  "aaa_group":     { "TACACS-GROUP": "aaag-6afb" }
 }
 ```
 
@@ -267,20 +281,16 @@ grouped by category. Use this to reverse-look up any token in the sanitised outp
 | AAA group server block names + refs | ✓ | ✓ | ✓ |
 | Descriptions (all positions) | ✓ | ✓ | ✓ |
 | IPv4 host addresses | ✓ | ✓ | ✓ |
+| IPv6 host addresses | ✓ | ✓ | ✓ |
 
 ---
 
 ## Known Limitations
 
-The following items are **not currently sanitised**. They are demonstrated in the
-test configs so future work can be verified.
+The following items are **not currently sanitised**.
 
 | Item | Detail |
 |------|--------|
-| **IPv6 addresses** | No IPv6 address anonymisation. All `2001:db8:...`, `FE80::`, `::` addresses pass through unchanged. BGP neighbour *passwords* on IPv6 sessions are still removed; only the addresses themselves are not tokenised. This is the highest-priority outstanding item for dual-stack deployments. |
-| **IPv6 ACL content** | `deny ipv6 2001:db8::/48 any` — the IPv6 prefixes in ACL entries are not anonymised. |
-| **IPv6 prefix-list / prefix-set entries** | Prefix values inside `ipv6 prefix-list` and XR `prefix-set` blocks are not anonymised. |
-| **IPv6 static routes** | `ipv6 route ::/0 2001:db8::1` — next-hop address not anonymised. |
 | **`snmp-server contact` on IOS XR** | XR uses an identical syntax and is handled, but the XR `snmp-server contact` is inside a block context in some versions. Verify against your XR release. |
 | **Hostnames in `description` lines** | If a hostname (e.g. `CORE-ROUTER-LON-01`) appears literally inside a description string, the description token replaces the whole string but the original is visible in the mapping file. |
 | **`archive path` naming conventions** | The TFTP/FTP server IP is anonymised by the IP pass, but the path template (e.g. `/configs/$h-$t`) reveals the naming convention. |
@@ -290,10 +300,9 @@ test configs so future work can be verified.
 
 ## Testing
 
-Three sample configs are included in `test_configs/` to verify coverage across all
-three platforms. Each config includes IPv6 configuration to demonstrate the current
-IPv6 limitation. See `test_configs/TEST_REFERENCE.md` for the full rule coverage
-matrix and verification checklist.
+Three sample configs are included in `test_configs/` covering all three platforms
+and exercising all sanitisation rules including IPv6. See `test_configs/TEST_REFERENCE.md`
+for the full rule coverage matrix and verification checklist.
 
 ```bash
 python cisco_sanitise.py \

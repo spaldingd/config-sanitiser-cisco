@@ -2,8 +2,7 @@
 
 `cisco_sanitise.py` is a single unified script supporting IOS, IOS XE, and IOS XR.
 Three sample configs exercise its sanitisation rules across all three platforms.
-Each config also includes IPv6 configuration to demonstrate the current IPv6
-limitation (addresses pass through unsanitised).
+Each config includes IPv6 configuration exercising all IPv6 sanitisation rules.
 
 ---
 
@@ -49,7 +48,8 @@ mapping file.
 | BGP template | `tmpl` | `tmpl-cc8a` |
 | Description text | `desc` | `desc-9dee` |
 | AS number | `AS` | `AS-2b08` |
-| IPv4 host address | `IP` | `IP-b766` |
+| IPv4 host address | `IPv4` | `IPv4-b766` |
+| IPv6 host address | `IPv6` | `IPv6-3a7f` |
 
 Credentials and sensitive free-text values are replaced with the literal `<REMOVED>`
 rather than a token, as they carry no structural meaning that needs to remain
@@ -280,8 +280,8 @@ Anonymised to `vrf-xxxx`. All definition and reference syntaxes are covered:
 | prefix-set def (XR) | `prefix-set PFX-SET-NAME` | — | — | ✓ |
 | XR destination in ref | `destination in PFX-SET-NAME` | — | — | ✓ |
 
-Note: `ipv6 prefix-list` names are tokenised but the IPv6 prefix *values* inside
-entries are not anonymised (see Known Limitations).
+Note: `ipv6 prefix-list` names are tokenised; the IPv6 prefix *values* inside
+entries (e.g. `2001:db8:1::/48`) are also tokenised by the IPv6 address pass.
 
 #### Community Lists and Community Sets
 
@@ -342,15 +342,39 @@ The same description text maps to the same `desc-xxxx` token wherever it appears
 
 ### Pass 6 — IPv4 Addresses
 
-IPv4 host addresses are anonymised last, after all named-object and credential passes.
+IPv4 host addresses are anonymised after all named-object and credential passes.
 
-- **Token format** — `IP-xxxx` (4 hex chars), e.g. `IP-b766`
-- **Deterministic** — same source IP → same `IP-xxxx` token for the same seed
+- **Token format** — `IPv4-xxxx` (4 hex chars), e.g. `IPv4-b766`
+- **Deterministic** — same source IP → same `IPv4-xxxx` token for the same seed
 - **Loopbacks preserved** — `127.0.0.0/8` range only; routable IPs on Loopback
   interfaces are anonymised
 - **Special addresses preserved** — `0.0.0.0` and `255.255.255.255` exactly
 - **Subnet masks preserved** — standard mask octets (255/254/252/248/240/224/192/128/0)
-- **Wildcard masks preserved** — second address on ACE lines preserved by position
+- **Wildcard masks preserved** — second address on ACE lines and `network` statement
+  lines preserved by position
+
+---
+
+### Pass 7 — IPv6 Addresses
+
+IPv6 host addresses are anonymised last, after the IPv4 pass.
+
+- **Token format** — `IPv6-xxxx` (4 hex chars), e.g. `IPv6-3a7f`
+- **Deterministic** — same source address → same `IPv6-xxxx` token for the same seed
+- **Detection** — a nine-alternation regex covering all RFC 5952 compressed forms,
+  bounded by negative lookbehind/lookahead to exclude prefix lengths (`/64` etc.).
+  Each candidate is validated with `ipaddress.ip_address()` to eliminate false
+  positives (MAC addresses, type-7 credential hashes)
+- **Preserved addresses:**
+  - `::1` — loopback (`addr.is_loopback`)
+  - `::` — unspecified (`addr.is_unspecified`)
+  - `fe80::/10` — link-local (`addr.is_link_local`), e.g. `FE80::1`
+  - `ff00::/8` — multicast (`addr.is_multicast`), e.g. `ff02::5`
+- **No skip-span logic needed** — IPv6 ACLs and prefix statements use CIDR notation
+  exclusively; there are no separate wildcard address fields analogous to IPv4 ACE
+  wildcards. The `/` in CIDR notation is excluded by the regex lookbehind.
+- **Credential safety** — the IPv6 pass runs after pass 1, so type-7 hashes
+  (e.g. `060506324F41584B56`) are already `<REMOVED>` and cannot be falsely matched
 
 ---
 
@@ -369,7 +393,7 @@ IPv4 host addresses are anonymised last, after all named-object and credential p
 | TACACS/RADIUS block keys | — | ✓ | ✓ |
 | TACACS/RADIUS flat keys (IOS) | ✓ | — | — |
 | AAA server-private keys | ✓ | ✓ | ✓ |
-| BGP neighbor password | ✓ | ✓ | — |
+| BGP neighbor password (IPv4 + IPv6) | ✓ | ✓ | ✓ |
 | XR BGP password (neighbor block) | ✓ | ✓ | ✓ |
 | IKE pre-shared-key | — | ✓ | — |
 | crypto isakmp key | ✓ | ✓ | — |
@@ -412,23 +436,18 @@ IPv4 host addresses are anonymised last, after all named-object and credential p
 | BGP templates | — | ✓ | — |
 | Descriptions (standalone + inline) | ✓ | ✓ | ✓ |
 | IPv4 host addresses | ✓ | ✓ | ✓ |
-| IPv6 addresses (NOT sanitised) | ✗ | ✗ | ✗ |
+| IPv6 host addresses | ✓ | ✓ | ✓ |
+| IPv6 link-local / loopback / multicast preserved | ✓ | ✓ | ✓ |
 
 ---
 
 ## Known Limitations
 
-The following items are not currently sanitised. The test configs include examples
-of each so that future fixes can be verified by re-running the test suite.
+The following items are not currently sanitised.
 
 | Item | Detail | Test config |
 |------|--------|-------------|
-| **IPv6 host addresses** | All IPv6 addresses pass through unchanged — `2001:db8:...`, `FE80::`, `::` etc. BGP neighbour *passwords* on IPv6 sessions are correctly removed; only the addresses are not tokenised. Highest-priority outstanding item for dual-stack deployments. | All three |
-| **IPv6 ACL entries** | `deny ipv6 2001:db8:bad::/48 any` — IPv6 prefixes in ACL entries not anonymised | `sample_ios`, `sample_iosxe` |
-| **IPv6 prefix-list / prefix-set values** | Prefix *names* are tokenised; the IPv6 prefix values inside entries are not | All three |
-| **IPv6 static route next-hops** | `ipv6 route ::/0 2001:db8::1` — next-hop address not anonymised | `sample_ios`, `sample_iosxe` |
-| **IPv6 BGP neighbour addresses** | `neighbor 2001:db8::1 remote-as ...` — address not anonymised (password is removed) | All three |
-| **`archive path` naming convention** | Server IP is anonymised by the IP pass; the path template (e.g. `/configs/$h-$t`) reveals the device naming convention | — |
+| **`archive path` naming convention** | Server IP is anonymised by the IPv4 pass; the path template (e.g. `/configs/$h-$t`) reveals the device naming convention | — |
 | **Hostnames embedded in descriptions** | If a real hostname appears inside a description string, the whole description is tokenised (good) but the mapping file retains the original, which contains the hostname | — |
 
 ---
@@ -505,13 +524,18 @@ definition line and any `snmp-server host` reference line.
 `TACACS-GROUP` should carry the same `aaag-xxxx` token on the `aaa group server`
 definition line and all `aaa authentication` / `aaa authorization` reference lines.
 
-**IP addresses tokenised**
-All non-loopback host addresses replaced with `IP-xxxx` tokens. Subnet masks and
+**IPv4 addresses tokenised**
+All non-loopback host addresses replaced with `IPv4-xxxx` tokens. Subnet masks and
 wildcard masks untouched.
 
-**IPv6 addresses NOT tokenised** (expected)
-All `2001:db8:...`, `FE80::`, `::` addresses should pass through unchanged. This
-confirms the known limitation is correctly documented and demonstrated.
+**IPv6 addresses tokenised**
+All routable IPv6 addresses replaced with `IPv6-xxxx` tokens. Verify:
+- `2001:db8:...` addresses become `IPv6-xxxx` tokens
+- `FE80::x` link-local addresses are preserved unchanged
+- `::1` loopback and `::` unspecified addresses are preserved unchanged
+- `ff02::x` multicast addresses are preserved unchanged
+- CIDR prefix lengths (`/64`, `/128`) are untouched
+- The `[ipv6_address]` section appears in the mapping file
 
 **Names consistent**
 A named object (e.g. `RMAP-ACME-IN`) should carry the same `rmap-xxxx` token on

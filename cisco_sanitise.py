@@ -11,8 +11,11 @@ Credentials    : enable secret/password, username secrets, type-5/7 hashes,
                  including server-private keys in aaa group server blocks),
                  IKE pre-shared-keys, BGP neighbour passwords, NTP auth keys,
                  PKI cert blocks, PKI enrollment URL and subject-name
-IP addresses   : all IPv4 host addresses → consistent IP-xxxx tokens,
-                 subnet masks / wildcard masks / CIDR prefixes left unchanged
+IP addresses   : all IPv4 host addresses → consistent IPv4-xxxx tokens,
+                 all IPv6 host addresses → consistent IPv6-xxxx tokens,
+                 subnet masks / wildcard masks / CIDR prefixes left unchanged;
+                 link-local, loopback, multicast, and unspecified IPv6
+                 addresses are preserved
 AS numbers     : router bgp, neighbor remote-as, VRF rd / route-targets,
                  community-list value lines, bgp confederation identifier/peers,
                  bgp local-as — consistent AS-xxxx tokens
@@ -88,7 +91,8 @@ CATEGORY_PREFIXES = {
     "template":       "tmpl",
     "description":    "desc",
     "as_number":      "AS",
-    "ip_address":     "IP",
+    "ip_address":     "IPv4",
+    "ipv6_address":   "IPv6",
 }
 
 # Standard subnet masks (255.x.x.x or 0.x.x.x patterns with only valid mask octets)
@@ -112,6 +116,24 @@ _ACE_LINE_RE = re.compile(
 _NETWORK_STMT_RE = re.compile(
     r'^\s+network\s+\S+\s+.*$', re.M
 )
+
+# IPv6 address regex — union of all RFC 5952 compressed forms.
+# Bounded by negative lookbehind/lookahead so it stops at '/' (prefix length),
+# whitespace, and other delimiters.  Each candidate is validated with
+# ipaddress.ip_address() to eliminate false positives (e.g. MAC addresses,
+# type-7 credential hashes).
+_IPV6_RE = re.compile(r"""(?<![:\w./])(
+    (?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}             |
+    (?:[0-9a-fA-F]{1,4}:){1,7}:                           |
+    (?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}          |
+    (?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2} |
+    (?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3} |
+    (?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4} |
+    (?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5} |
+    [0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){1,6}          |
+    ::(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4}         |
+    ::
+)(?![:\w])""", re.X | re.I)
 
 
 def _collect_skip_spans(text: str) -> set[tuple[int, int]]:
@@ -184,28 +206,30 @@ class TokenGenerator:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  IP ANONYMISER  —  IP_xxxx token scheme, masks/CIDR preserved
+#  IP ANONYMISER  —  IPv4-xxxx / IPv6-xxxx token scheme, masks/CIDR preserved
 # ══════════════════════════════════════════════════════════════════════════════
 
 class IPAnonymiser:
-    # Addresses that are always kept verbatim
-    PRESERVE = {"0.0.0.0", "255.255.255.255", "127.0.0.1"}
+    # IPv4 addresses always kept verbatim
+    PRESERVE_V4 = {"0.0.0.0", "255.255.255.255", "127.0.0.1"}
 
     def __init__(self, tokens: TokenGenerator):
         self.tokens = tokens
 
-    def _anon(self, original: str) -> str:
-        """Return consistent IP_xxxx token for a host address."""
+    # ── IPv4 ──────────────────────────────────────────────────────────────────
+
+    def _anon_v4(self, original: str) -> str:
+        """Return consistent IPv4-xxxx token for a host address."""
         try:
             addr = ipaddress.ip_address(original)
         except ValueError:
             return original
-        if addr.is_loopback or original in self.PRESERVE:
+        if addr.is_loopback or original in self.PRESERVE_V4:
             return original
         return self.tokens.get("ip_address", original)
 
     def anonymise(self, text: str) -> str:
-        """Replace host IPs with IP_xxxx tokens; leave masks and CIDR alone."""
+        """Replace IPv4 host addresses with IPv4-xxxx tokens; leave masks and CIDR alone."""
         skip_spans = _collect_skip_spans(text)
 
         ip_re = re.compile(
@@ -219,8 +243,43 @@ class IPAnonymiser:
                 parts.append(text[prev:m.end()])
             else:
                 parts.append(text[prev:m.start()])
-                parts.append(self._anon(m.group(0)))
+                parts.append(self._anon_v4(m.group(0)))
             prev = m.end()
+        parts.append(text[prev:])
+        return "".join(parts)
+
+    # ── IPv6 ──────────────────────────────────────────────────────────────────
+
+    def _anon_v6(self, original: str) -> str:
+        """Return consistent IPv6-xxxx token for a host address."""
+        try:
+            addr = ipaddress.ip_address(original)
+        except ValueError:
+            return original
+        # Preserve protocol-reserved addresses — carry no topology information
+        if (addr.is_loopback or addr.is_unspecified
+                or addr.is_link_local or addr.is_multicast):
+            return original
+        return self.tokens.get("ipv6_address", original)
+
+    def anonymise_v6(self, text: str) -> str:
+        """Replace IPv6 host addresses with IPv6-xxxx tokens.
+
+        IPv6 ACLs and prefix statements use CIDR notation exclusively — there
+        are no separate wildcard address fields — so no skip-span logic is
+        needed.  The negative lookbehind on '/' in _IPV6_RE ensures prefix
+        lengths (/64, /128, etc.) are never matched as part of an address.
+        Each regex candidate is validated with ipaddress.ip_address() to
+        eliminate false positives such as MAC addresses.
+        """
+        parts: list[str] = []
+        prev = 0
+        for m in _IPV6_RE.finditer(text):
+            candidate = m.group(1)
+            replacement = self._anon_v6(candidate)
+            parts.append(text[prev:m.start(1)])
+            parts.append(replacement)
+            prev = m.end(1)
         parts.append(text[prev:])
         return "".join(parts)
 
@@ -251,6 +310,8 @@ class CiscoSanitiser:
         if self.ip_anon:
             text = self.ip_anon.anonymise(text)
             self._log.append("  [IP]  IPv4 host addresses anonymised")
+            text = self.ip_anon.anonymise_v6(text)
+            self._log.append("  [IP]  IPv6 host addresses anonymised")
         return text
 
     @property
@@ -949,7 +1010,7 @@ def main() -> None:
     print("║  IOS · IOS XE · IOS XR                                  ║")
     print("╚══════════════════════════════════════════════════════════╝")
     print(f"  Seed            : {args.seed}")
-    print(f"  Anonymise IPs   : {'No' if args.no_ips else 'Yes (IP_xxxx tokens)'}")
+    print(f"  Anonymise IPs   : {'No' if args.no_ips else 'Yes (IPv4-xxxx / IPv6-xxxx tokens)'}")
     print(f"  Anonymise descs : {'No' if args.no_descriptions else 'Yes'}")
     print(f"  Dry run         : {'Yes' if args.dry_run else 'No'}")
 
