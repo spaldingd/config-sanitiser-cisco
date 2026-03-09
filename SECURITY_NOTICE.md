@@ -61,11 +61,15 @@ hashes. The values in the test configs (`$1$K2xP$mT9nL3vKpQ8rWzXy7sUoI3`,
 `$1$mERr$hx5rVt7rPNoS4wqbXKX7m0`, etc.) were generated with random salts and do
 not correspond to any known or used passphrase.
 
-### Plaintext credential values used
+### Plaintext sensitive values used
 
 The following cleartext values appear across the test configs. They are listed here
 in full to make clear that they are obviously contrived test strings, not operational
-secrets:
+secrets. The table covers two categories: **credentials** (keys, passwords, secrets)
+and **device identity data** (hardware identifiers that are not credentials but are
+still sensitive and must be redacted).
+
+#### Credentials
 
 | Value | Where used |
 |-------|-----------|
@@ -91,6 +95,22 @@ None of these strings have ever been used as a credential on any real system. Th
 deliberate use of `$ecret`, `@ccess`, and similar leet-speak substitutions is
 intentional — it makes them visually distinct from real operational credentials while
 still exercising every code path in the sanitiser that handles cleartext values.
+
+#### Device identity data
+
+Device identity fields are not credentials, but they uniquely identify physical
+hardware and must be redacted. They are fabricated values that follow the correct
+format for their field type but do not correspond to any real device.
+
+| Value | Field | Where used |
+|-------|-------|-----------|
+| `ISR4351/K9` | Product ID (PID) | `license udi` line in `sample_ios.cfg` |
+| `FDO2213A0GL` | Serial number (SN) | `license udi` line in `sample_ios.cfg` |
+| `C9500-16X` | Product ID (PID) | `license udi` line in `sample_iosxe.cfg` |
+| `FCW2233A5ZV` | Serial number (SN) | `license udi` line in `sample_iosxe.cfg` |
+
+These values are present solely to exercise the `license udi pid <PID> sn <SN>`
+redaction rule. They have never been assigned to any real Cisco device.
 
 ---
 
@@ -155,6 +175,8 @@ these rules:
       that resembles a real password policy format
 - [ ] Type-5 hashes must be generated fresh with a random salt and must not
       encode any real or guessable passphrase
+- [ ] If adding a `license udi` line, use a clearly fictitious PID and serial number
+      (e.g. `ISR4351/K9 sn FDO2213A0GL` — format correct, values fabricated)
 - [ ] Any new credential pattern added for test coverage must be accompanied by a
       corresponding entry in `test_configs/TEST_REFERENCE.md`
 - [ ] Run `cisco_sanitise.py --dry-run` against your new config and confirm that

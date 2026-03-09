@@ -10,7 +10,8 @@ Credentials    : enable secret/password, username secrets, type-5/7 hashes,
                  key-strings, TACACS+/RADIUS keys (block and flat style,
                  including server-private keys in aaa group server blocks),
                  IKE pre-shared-keys, BGP neighbour passwords, NTP auth keys,
-                 PKI cert blocks, PKI enrollment URL and subject-name
+                 PKI cert blocks, PKI enrollment URL and subject-name,
+                 Smart Licensing UDI (product ID and serial number)
 IP addresses   : all IPv4 host addresses → consistent IPv4-xxxx tokens,
                  all IPv6 host addresses → consistent IPv6-xxxx tokens,
                  subnet masks / wildcard masks / CIDR prefixes left unchanged;
@@ -504,6 +505,15 @@ class CiscoSanitiser:
             text = S(re.compile(
                 rf'^(\s*{re.escape(kw)}\s+).+$', re.M),
                 r'\1<REMOVED>', text, f"call-home {kw}")
+
+        # Smart Licensing UDI — written to running-config by IOS/IOS XE.
+        # Format: license udi pid <PRODUCT-ID> sn <SERIAL-NUMBER>
+        # Both PID and serial number uniquely identify the physical device
+        # and must be redacted. The keywords 'pid' and 'sn' are preserved
+        # so the reader can see which field was in each position.
+        text = S(re.compile(
+            r'^(license\s+udi\s+pid\s+)\S+(\s+sn\s+)\S+', re.M),
+            r'\1<REMOVED>\2<REMOVED>', text, "license udi (pid + sn)")
 
         return text
 

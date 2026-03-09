@@ -29,6 +29,9 @@ without exposing credentials, internal addressing, or network topology.
   text replaced with `<REMOVED>` while preserving the delimiter structure
 - **Call-home fields redacted** — `contact-email-addr`, `street-address`, `site-id`,
   `customer-id`, `phone-number`, and `contract-id` all replaced with `<REMOVED>`
+- **Smart Licensing UDI redacted** — `license udi pid <REMOVED> sn <REMOVED>` —
+  the product ID and chassis serial number are both replaced; present on IOS/IOS XE,
+  not applicable to IOS XR
 - **Named objects tokenised** — hostnames, usernames, domain names, VRFs,
   route-maps/policies, policy-maps, class-maps, named ACLs, prefix-lists/sets,
   community-lists/sets, peer-groups, neighbor-groups, keychains, crypto maps,
@@ -257,6 +260,7 @@ grouped by category. Use this to reverse-look up any token in the sanitised outp
 | PKI enrollment url / subject-name | — | ✓ | — |
 | Banner body text | ✓ | ✓ | ✓ |
 | Call-home sensitive fields | ✓ | ✓ | ✓ |
+| Smart Licensing UDI (pid + sn) | ✓ | ✓ | — |
 | SNMP community + host refs | ✓ | ✓ | ✓ |
 | SNMP location + contact | ✓ | ✓ | ✓ |
 | AS numbers + community values | ✓ | ✓ | ✓ |

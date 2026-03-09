@@ -144,6 +144,23 @@ Covers `banner motd`, `banner login`, `banner exec`, and `banner incoming`.
 | phone-number | ` phone-number +442079460000` | ✓ | ✓ | ✓ |
 | contract-id | ` contract-id CON-98765432` | ✓ | ✓ | ✓ |
 
+#### Smart Licensing UDI
+
+The UDI (Unique Device Identifier) line is written to running-config by IOS and
+IOS XE. It is not present in IOS XR running-config (XR only exposes UDI via
+`show license udi` in admin exec mode). Both fields on the line identify the
+physical chassis and must be redacted:
+
+- **PID** (Product ID) — identifies the exact hardware model
+- **SN** (Serial Number) — uniquely identifies the individual chassis
+
+The keywords `pid` and `sn` are preserved so the reader can see which field
+occupied each position.
+
+| Rule | Syntax matched | IOS | XE | XR |
+|------|---------------|:---:|:---:|:---:|
+| license udi | `license udi pid ASR-920-4SZ-D sn CAT2211U7WD` → `license udi pid <REMOVED> sn <REMOVED>` | ✓ | ✓ | — |
+
 ---
 
 ### Pass 2 — SNMP
@@ -417,6 +434,7 @@ IPv6 host addresses are anonymised last, after the IPv4 pass.
 | PKI subject-name | — | ✓ | — |
 | Banner body | ✓ | ✓ | ✓ |
 | Call-home fields (all 6) | ✓ | ✓ | ✓ |
+| Smart Licensing UDI (pid + sn) | ✓ | ✓ | — |
 | SNMP community (def + host ref + ACL) | ✓ | ✓ | ✓ |
 | SNMP location | ✓ | ✓ | ✓ |
 | SNMP contact | ✓ | ✓ | ✓ |
@@ -524,6 +542,11 @@ replacing the body text between them.
 
 **Call-home fields removed**
 All six call-home sensitive fields should show `<REMOVED>`.
+
+**Smart Licensing UDI removed**
+`license udi pid <REMOVED> sn <REMOVED>` — both the PID and serial number fields
+must be `<REMOVED>`. The keywords `pid` and `sn` must be preserved. This line is
+only present on IOS and IOS XE; IOS XR has no equivalent config line.
 
 **SNMP contact removed**
 `snmp-server contact` should show `<REMOVED>`.
