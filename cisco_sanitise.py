@@ -49,6 +49,7 @@ import json
 import hashlib
 import argparse
 import ipaddress
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -1005,6 +1006,72 @@ Examples:
     return p.parse_args()
 
 
+# Repository URL — update this when the project is published.
+# This value is embedded in the sanitised-configuration banner.
+REPO_URL = "https://github.com/spaldingd/config-sanitiser-cisco"
+
+
+def _seed_fingerprint(seed: str) -> str:
+    """
+    Return a 16-character hex fingerprint of the seed (first 64 bits of
+    SHA-256). This is published in the sanitised-output banner so that two
+    files can be verified as sharing the same seed (and therefore having
+    consistent tokens) without exposing the seed itself.
+
+    The seed is intentionally kept secret because, combined with the script,
+    it enables forward-lookup against guessable values — most critically,
+    IP addresses, where exhaustive enumeration of RFC 1918 space is trivial.
+    A fingerprint preserves the diff-ability use-case while eliminating that
+    risk.
+    """
+    return hashlib.sha256(seed.encode()).hexdigest()[:16]
+
+
+def _sanitised_banner(seed: str, anonymise_ips: bool,
+                      anonymise_descriptions: bool) -> str:
+    """
+    Return a comment block to prepend to every sanitised output file.
+    Uses '!' as the comment character, which is valid on IOS, IOS XE, and IOS XR.
+    The action list is dynamic — IP and description lines are only included when
+    those passes are active.
+    The seed fingerprint (not the seed itself) is included so that two sanitised
+    files can be confirmed as using the same seed without exposing it.
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    fingerprint = _seed_fingerprint(seed)
+    actions = [
+        "credentials and keys replaced with <REMOVED>",
+        "device identity data (Smart Licensing UDI) replaced with <REMOVED>",
+        "named objects (hostnames, VRFs, ACLs, route-maps, etc.) replaced with"
+        " opaque tokens",
+    ]
+    if anonymise_ips:
+        actions.append(
+            "IP addresses (IPv4 and IPv6) replaced with opaque tokens")
+    if anonymise_descriptions:
+        actions.append("description text replaced with opaque tokens")
+
+    sep = "!" + "=" * 69
+    lines = [
+        sep,
+        "! SANITISED CONFIGURATION",
+        "! This file has been processed by cisco_sanitise.py.",
+        "! Original sensitive data has been replaced as follows:",
+        "!",
+    ]
+    for action in actions:
+        lines.append(f"!   - {action}")
+    lines += [
+        "!",
+        f"! Sanitised   : {now}",
+        f"! Seed hash   : {fingerprint}  (SHA-256 fingerprint — not the seed itself)",
+        f"! Script      : {REPO_URL}",
+        sep,
+        "",   # blank line before the config body begins
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def process_file(path: Path, dest: "Path | None",
                  sanitiser: CiscoSanitiser, dry_run: bool) -> bool:
     print(f"\n{'─' * 60}")
@@ -1016,6 +1083,12 @@ def process_file(path: Path, dest: "Path | None",
         return False
 
     result = sanitiser.process(text)
+    banner = _sanitised_banner(
+        seed=sanitiser.tokens.seed,
+        anonymise_ips=sanitiser.ip_anon is not None,
+        anonymise_descriptions=sanitiser.anonymise_descriptions,
+    )
+    result = banner + result
     for entry in sanitiser.log:
         print(entry)
 

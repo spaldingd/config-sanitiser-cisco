@@ -45,6 +45,10 @@ without exposing credentials, internal addressing, or network topology.
   reproducible and comparable across runs
 - **Traceable** — every substitution is recorded; an optional JSON mapping file maps
   every original value back to its token
+- **Self-documenting output** — every sanitised file begins with a comment banner
+  that identifies it as sanitised, lists the actions taken, records a seed
+  fingerprint (not the seed itself) and timestamp, and links to the script
+  repository
 
 ---
 
@@ -52,7 +56,7 @@ without exposing credentials, internal addressing, or network topology.
 
 - Python 3.10 or later
 - No third-party dependencies — standard library only (`re`, `hashlib`, `argparse`,
-  `ipaddress`, `json`, `pathlib`)
+  `ipaddress`, `json`, `pathlib`, `datetime`)
 
 ---
 
@@ -128,6 +132,20 @@ Each token is derived from a SHA-256 hash of `seed:category:original_value`, so 
 same value always maps to the same token within a run, and across runs using the same
 seed. This means a VRF name referenced in ten places will carry the same `vrf-xxxx`
 token in all ten places in the output.
+
+### Seed confidentiality
+
+**Treat the seed as sensitive.** SHA-256 is one-way, so a token alone cannot be
+reversed to its source value. However, anyone with the seed and the script can perform
+a forward lookup: compute the expected token for any candidate value and check whether
+it matches the output. For IP addresses this is a practical threat — RFC 1918 space
+is small enough to enumerate exhaustively in seconds. For named objects the risk
+depends on whether an attacker can guess your naming conventions.
+
+The sanitised-output banner records a **16-character SHA-256 fingerprint** of the
+seed (not the seed itself). This lets two files be verified as sharing the same seed
+— and therefore having consistent, comparable tokens — without exposing the seed to
+anyone who reads the sanitised output.
 
 ---
 

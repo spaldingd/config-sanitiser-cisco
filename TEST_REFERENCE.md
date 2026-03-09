@@ -525,6 +525,24 @@ python cisco_sanitise.py \
 
 ## What to Verify After Running
 
+**Sanitisation banner present**
+The first line of every output file should be `!` followed by a row of `=` signs.
+The banner block should contain:
+- `! SANITISED CONFIGURATION`
+- A bullet list of actions taken (credentials, named objects, and optionally IPs
+  and descriptions depending on flags used)
+- `! Sanitised   :` with a UTC timestamp
+- `! Seed hash   :` with a 16-character hex fingerprint of the seed (not the seed
+  itself — the fingerprint is a one-way SHA-256 commitment that allows two files
+  to be verified as sharing the same seed without exposing it)
+- `! Script      :` with the repository URL
+
+To verify two sanitised files share the same seed, compare their `Seed hash` values.
+To update the repository URL, set `REPO_URL` near the top of the script.
+
+The banner uses `!` as the comment character, which is valid on IOS, IOS XE, and
+IOS XR.
+
 **Credentials removed**
 Search the output for `$1$`, `$5$`, `password 7`, `key 7`, `key 0`, `secret`.
 None should retain a real value — all should show `<REMOVED>`.

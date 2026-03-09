@@ -160,6 +160,46 @@ intended to be, and should never be treated as, outputs.
 
 ---
 
+## The Seed and Token Reversibility
+
+Tokens are derived from `SHA-256(seed:category:original_value)`. SHA-256 is a
+one-way function — a token alone cannot be reversed to its source value, even
+with full knowledge of the script.
+
+However, the seed enables **forward lookup**: anyone who has the seed and the
+script can compute the expected token for any candidate value and check whether
+it matches the sanitised output. This is structurally the same as a salted
+password hash — the salt is known, but an attacker still has to guess the input.
+
+**Treat the seed as sensitive.** The practical severity depends on the data type:
+
+| Data type | Enumeration feasibility | Risk with seed exposed |
+|-----------|------------------------|----------------------|
+| IPv4 addresses | RFC 1918 (~16 M addresses) — enumerable in seconds | High — full IP mapping reconstructible |
+| IPv6 addresses | `2001:db8::/32` documentation range used in test configs; real ranges may be larger but still enumerable if the prefix is known | Medium–High |
+| Hostnames / VRF names | Depends on naming conventions; systematic names (e.g. `SITE-ROUTER-LON-01`) are guessable | Low–Medium |
+| Credentials | Already replaced with `<REMOVED>` — tokens are never issued for credential values | Not applicable |
+
+### What the banner exposes
+
+The sanitised-output banner records a **16-character SHA-256 fingerprint** of the
+seed — the first 64 bits of `SHA-256(seed)`. This is a one-way commitment: it
+allows two sanitised files to be verified as sharing the same seed (and therefore
+having consistent, comparable tokens) without exposing the seed to anyone who reads
+the output. The fingerprint alone provides no advantage to an attacker performing
+forward lookup; they still need the actual seed.
+
+### Recommended practice
+
+- Use a seed that is not guessable or publicly documented (not `cisco-sanitise`,
+  not a project name, not a date)
+- Distribute the seed only to people who are authorised to reverse-look up tokens
+- Store it alongside the mapping file (`--dump-map`), not alongside the sanitised
+  configs themselves
+- If a seed is compromised, re-sanitise all affected configs with a new seed
+
+---
+
 ## Checklist for New Contributors
 
 If you are adding new test configuration content to this project, please follow
