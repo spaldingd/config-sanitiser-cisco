@@ -78,18 +78,41 @@ chmod +x cisco_sanitise.py
 python cisco_sanitise.py -i INPUT [-o OUTPUT] [options]
 ```
 
-### Arguments
+### Core arguments
 
 | Argument | Description |
 |----------|-------------|
 | `-i`, `--input` | Input file or directory (required) |
 | `-o`, `--output` | Output file or directory. Defaults to `<input>_sanitised` alongside the source |
 | `--seed TEXT` | Determinism seed. Same seed = same tokens every run. Default: `cisco-sanitise` |
-| `--no-ips` | Skip IPv4 address anonymisation |
-| `--no-descriptions` | Skip description line anonymisation |
 | `--dump-map FILE` | Write the full `original → token` mapping to a JSON file |
 | `--dry-run` | Print sanitised output to stdout; do not write any files |
 | `--extensions` | Comma-separated file extensions to process. Default: `.cfg,.txt,.conf,.log` |
+| `--list-items` | Print all valid group, pass, and item IDs, then exit |
+
+### Selection flags
+
+Sanitisation actions are organised in a three-level hierarchy: **group → pass → item**. Any level can be selectively enabled or disabled. When flags at multiple levels are combined, item-level takes precedence over pass-level, which takes precedence over group-level.
+
+| Flag | Description |
+|------|-------------|
+| `--skip-group GROUP[,GROUP...]` | Disable all items in the named group(s) |
+| `--only-group GROUP[,GROUP...]` | Enable only the named group(s); disable all others |
+| `--skip-pass PASS[,PASS...]` | Disable all items in the named pass(es) |
+| `--only-pass PASS[,PASS...]` | Enable only the named pass(es); disable all others |
+| `--skip ITEM[,ITEM...]` | Disable the named item(s) individually |
+| `--only ITEM[,ITEM...]` | Enable only the named item(s); disable all others |
+
+`--skip` and `--only` are mutually exclusive at each level. Run `--list-items` to see all valid IDs.
+
+**Available groups:** `credentials`, `snmp`, `bgp-topology`, `named-objects`, `addressing`, `descriptions`
+
+**Legacy flags** (still supported, mapped to the new system):
+
+| Flag | Equivalent |
+|------|-----------|
+| `--no-ips` | `--skip-group addressing` |
+| `--no-descriptions` | `--skip-pass descriptions` |
 
 ### Examples
 
@@ -103,8 +126,20 @@ python cisco_sanitise.py -i router.cfg -o router_clean.cfg --dump-map map.json
 # Preview sanitised output without writing any files
 python cisco_sanitise.py -i router.cfg --dry-run --seed myproject
 
-# Sanitise named objects only — keep real IPs and descriptions
+# Skip IP address and description anonymisation (legacy syntax still works)
 python cisco_sanitise.py -i ./configs/ -o ./sanitised/ --no-ips --no-descriptions
+
+# Run only credential and SNMP sanitisation; leave everything else untouched
+python cisco_sanitise.py -i ./configs/ -o ./sanitised/ --only-group credentials,snmp
+
+# Run everything except VPN keys and banner/call-home fields
+python cisco_sanitise.py -i ./configs/ -o ./sanitised/ --skip-pass vpn-keys,informational
+
+# Anonymise only the hostname and IPv4 addresses; leave all else as-is
+python cisco_sanitise.py -i router.cfg --only hostname,ipv4-addresses
+
+# Print all available group / pass / item IDs
+python cisco_sanitise.py --list-items
 ```
 
 ---

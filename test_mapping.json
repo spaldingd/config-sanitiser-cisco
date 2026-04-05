@@ -12,11 +12,11 @@
   },
   "as_number": {
     "65001": "AS-2b08",
+    "65100": "AS-8a26",
+    "65200": "AS-b2c4",
     "65000": "AS-d20b",
     "65002": "AS-65fe",
-    "65003": "AS-e2b5",
-    "65100": "AS-8a26",
-    "65200": "AS-b2c4"
+    "65003": "AS-e2b5"
   },
   "hostname": {
     "ACCESS-ROUTER-LON-03": "host-50ed",
@@ -276,12 +276,12 @@
     "CMAP-CRITICAL-DATA": "cmap-9b03",
     "CMAP-SCAVENGER": "cmap-efcb"
   },
-  "trustpoint": {
-    "CORP-PKI-TRUSTPOINT": "tp-89b8"
-  },
   "template": {
     "TMPL-IBGP-SESSION": "tmpl-e831",
     "TMPL-IBGP-POLICY": "tmpl-8747"
+  },
+  "trustpoint": {
+    "CORP-PKI-TRUSTPOINT": "tp-89b8"
   },
   "neighbor_group": {
     "UPSTREAM-PEERS": "ng-77c9",

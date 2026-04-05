@@ -86,13 +86,20 @@ The script runs six sequential passes. Each pass operates on the output of the
 previous one. All patterns prevent newline-crossing by using `[^\S\n]+` rather than
 `\s+` between tokens within a single config line.
 
+Every pass is composed of named **items** — the atomic units of sanitisation. Items
+are grouped into **passes**, which are grouped into **groups**. Any level can be
+selectively enabled or disabled at the command line. See the
+[Selection Flags](#selection-flags) section for details.
+
 ---
 
-### Pass 1 — Credentials
+### Pass 1 — Credentials  `group: credentials`
 
 All credential values and sensitive literal strings are replaced with `<REMOVED>`.
 
-#### Authentication credentials
+#### Authentication credentials  `pass: local-auth / routing-auth / aaa-keys / vpn-keys`
+
+Pass-level item IDs: `enable-secret`, `username-secrets`, `line-passwords` (pass `local-auth`); `ospf-keys`, `keychain-keys`, `ntp-keys`, `bgp-passwords` (pass `routing-auth`); `tacacs-keys`, `radius-keys`, `server-private-keys` (pass `aaa-keys`); `isakmp-keys`, `tunnel-keys`, `ike-psk` (pass `vpn-keys`).
 
 | Rule | Syntax matched | IOS | XE | XR |
 |------|---------------|:---:|:---:|:---:|
@@ -118,14 +125,16 @@ All credential values and sensitive literal strings are replaced with `<REMOVED>
 | tunnel key | ` tunnel key <value>` | — | ✓ | — |
 | PKI certificate block | `certificate self-signed … quit` (multiline) | — | ✓ | — |
 
-#### PKI identity
+#### PKI identity  `pass: pki`
+
+Items: `pki-cert-blocks`, `pki-enrollment`, `pki-subject-name`.
 
 | Rule | Syntax matched | IOS | XE | XR |
 |------|---------------|:---:|:---:|:---:|
 | PKI enrollment url | ` enrollment url http://pki.internal.example.com` | — | ✓ | — |
 | PKI subject-name | ` subject-name CN=router.example.com,OU=Network,O=Corp` | — | ✓ | — |
 
-#### Banner body
+#### Banner body  `pass: informational`, item: `banner-body`
 
 | Rule | Syntax matched | IOS | XE | XR |
 |------|---------------|:---:|:---:|:---:|
@@ -133,7 +142,7 @@ All credential values and sensitive literal strings are replaced with `<REMOVED>
 
 Covers `banner motd`, `banner login`, `banner exec`, and `banner incoming`.
 
-#### Call-home block
+#### Call-home block  `pass: informational`, item: `call-home-fields`
 
 | Rule | Syntax matched | IOS | XE | XR |
 |------|---------------|:---:|:---:|:---:|
@@ -144,7 +153,7 @@ Covers `banner motd`, `banner login`, `banner exec`, and `banner incoming`.
 | phone-number | ` phone-number +442079460000` | ✓ | ✓ | ✓ |
 | contract-id | ` contract-id CON-98765432` | ✓ | ✓ | ✓ |
 
-#### Smart Licensing UDI
+#### Smart Licensing UDI  `pass: device-identity`, item: `license-udi`
 
 The UDI (Unique Device Identifier) line is written to running-config by IOS and
 IOS XE. It is not present in IOS XR running-config (XR only exposes UDI via
@@ -163,7 +172,9 @@ occupied each position.
 
 ---
 
-### Pass 2 — SNMP
+### Pass 2 — SNMP  `group: snmp`, `pass: snmp`
+
+Items: `snmp-communities`, `snmp-location`, `snmp-contact`.
 
 SNMP community strings are **tokenised** (not redacted) so that the same community
 name appearing in both a `snmp-server community` definition and a `snmp-server host`
@@ -180,7 +191,9 @@ reference maps to the same `snmp-xxxx` token, preserving traceability.
 
 ---
 
-### Pass 3 — AS Numbers
+### Pass 3 — AS Numbers  `group: bgp-topology`, `pass: as-numbers`
+
+Items: `bgp-asn`, `bgp-confederation`, `vrf-rd-rt`, `community-values`.
 
 BGP AS numbers and community values are tokenised to `AS-xxxx` tokens. The same AS
 number maps to the same token across all contexts.
@@ -202,7 +215,9 @@ number maps to the same token across all contexts.
 
 ---
 
-### Pass 4 — Named Objects
+### Pass 4 — Named Objects  `group: named-objects`
+
+Passes: `identity`, `routing-policy`, `bgp-peers`, `network-objects`, `aaa-objects`, `crypto-objects`. Run `--list-items` for the full item list.
 
 All named configuration objects are replaced with deterministic tokens. Definitions
 and all references share the same token category so names stay consistent throughout
@@ -355,7 +370,9 @@ entries (e.g. `2001:db8:1::/48`) are also tokenised by the IPv6 address pass.
 
 ---
 
-### Pass 5 — Descriptions
+### Pass 5 — Descriptions  `group: descriptions`, `pass: descriptions`
+
+Items: `standalone-descriptions`, `inline-descriptions`.
 
 Description text is anonymised to `desc-xxxx` tokens.
 
@@ -368,7 +385,7 @@ The same description text maps to the same `desc-xxxx` token wherever it appears
 
 ---
 
-### Pass 6 — IPv4 Addresses
+### Pass 6 — IPv4 Addresses  `group: addressing`, `pass: ipv4`, item: `ipv4-addresses`
 
 IPv4 host addresses are anonymised after all named-object and credential passes.
 
@@ -386,7 +403,7 @@ IPv4 host addresses are anonymised after all named-object and credential passes.
 
 ---
 
-### Pass 7 — IPv6 Addresses
+### Pass 7 — IPv6 Addresses  `group: addressing`, `pass: ipv6`, item: `ipv6-addresses`
 
 IPv6 host addresses are anonymised last, after the IPv4 pass.
 
@@ -497,10 +514,75 @@ The following items are not currently sanitised.
 
 ---
 
+---
+
+## Selection Flags
+
+Every sanitisation action belongs to a three-level hierarchy:
+
+```
+GROUP  →  PASS  →  ITEM
+```
+
+Any level can be enabled or disabled independently. When flags at multiple levels are combined, item-level takes precedence over pass-level, which takes precedence over group-level.
+
+### Complete hierarchy
+
+| Group | Pass | Items |
+|-------|------|-------|
+| `credentials` | `local-auth` | `enable-secret`, `username-secrets`, `line-passwords` |
+| | `routing-auth` | `ospf-keys`, `keychain-keys`, `ntp-keys`, `bgp-passwords` |
+| | `aaa-keys` | `tacacs-keys`, `radius-keys`, `server-private-keys` |
+| | `vpn-keys` | `isakmp-keys`, `tunnel-keys`, `ike-psk` |
+| | `pki` | `pki-cert-blocks`, `pki-enrollment`, `pki-subject-name` |
+| | `device-identity` | `license-udi` |
+| | `informational` | `banner-body`, `call-home-fields` |
+| `snmp` | `snmp` | `snmp-communities`, `snmp-location`, `snmp-contact` |
+| `bgp-topology` | `as-numbers` | `bgp-asn`, `bgp-confederation`, `vrf-rd-rt`, `community-values` |
+| `named-objects` | `identity` | `hostname`, `domain-name`, `usernames` |
+| | `routing-policy` | `route-maps`, `route-policies`, `policy-maps`, `class-maps`, `prefix-lists`, `prefix-sets`, `community-lists`, `community-sets` |
+| | `bgp-peers` | `peer-groups`, `neighbor-groups`, `bgp-templates` |
+| | `network-objects` | `vrfs`, `acls`, `object-groups`, `ip-sla`, `track-objects` |
+| | `aaa-objects` | `aaa-server-names`, `aaa-group-names` |
+| | `crypto-objects` | `crypto-maps`, `transform-sets`, `pki-trustpoints`, `keychains` |
+| `addressing` | `ipv4` | `ipv4-addresses` |
+| | `ipv6` | `ipv6-addresses` |
+| `descriptions` | `descriptions` | `standalone-descriptions`, `inline-descriptions` |
+
+### Flag reference
+
+| Flag | Level | Effect |
+|------|-------|--------|
+| `--skip-group G[,G...]` | Group | Disable all items in the named group(s) |
+| `--only-group G[,G...]` | Group | Enable only the named group(s) |
+| `--skip-pass P[,P...]` | Pass | Disable all items in the named pass(es) |
+| `--only-pass P[,P...]` | Pass | Enable only the named pass(es) |
+| `--skip I[,I...]` | Item | Disable the named item(s) |
+| `--only I[,I...]` | Item | Enable only the named item(s) |
+| `--list-items` | — | Print the full hierarchy and exit |
+| `--no-ips` | Group | Alias for `--skip-group addressing` |
+| `--no-descriptions` | Pass | Alias for `--skip-pass descriptions` |
+
+`--skip` and `--only` are mutually exclusive at each level. Combining `--skip-group` with `--skip-pass` and `--skip` is valid — the most specific level wins. Combining `--skip-group` with `--only-group` is not permitted.
+
+### Resolution order
+
+1. Start with all items enabled
+2. Apply `--skip-group` (disable all items in named groups)
+3. Apply `--only-group` (disable items not in named groups)
+4. Apply `--skip-pass` (disable all items in named passes)
+5. Apply `--only-pass` (disable items not in named passes)
+6. Apply `--skip` (disable named items)
+7. Apply `--only` (disable all items not explicitly named)
+
+Legacy flags (`--no-ips`, `--no-descriptions`) are injected at steps 2 and 4 respectively.
+
+---
+
 ## How to Run
 
 ```bash
-# Sanitise all three test configs with a reproducible seed
+# Sanitise all three test configs with a reproducible seed (all items enabled)
 python cisco_sanitise.py \
   -i ./test_configs/ \
   -o ./test_configs_sanitised/ \
@@ -513,12 +595,29 @@ python cisco_sanitise.py \
   --dry-run \
   --seed test-run-2024
 
-# Skip IP anonymisation (useful for isolating named-object changes)
+# Run only credential and SNMP sanitisation; leave IPs and names untouched
 python cisco_sanitise.py \
   -i ./test_configs/ \
   -o ./test_configs_sanitised/ \
   --seed test-run-2024 \
-  --no-ips
+  --only-group credentials,snmp
+
+# Skip banner and call-home (useful when those fields are already clean)
+python cisco_sanitise.py \
+  -i ./test_configs/ \
+  -o ./test_configs_sanitised/ \
+  --seed test-run-2024 \
+  --skip-pass informational
+
+# Anonymise only the hostname and IPv4 addresses
+python cisco_sanitise.py \
+  -i ./test_configs/sample_iosxe.cfg \
+  --dry-run \
+  --seed test-run-2024 \
+  --only hostname,ipv4-addresses
+
+# Print all valid group / pass / item IDs
+python cisco_sanitise.py --list-items
 ```
 
 ---
@@ -529,8 +628,9 @@ python cisco_sanitise.py \
 The first line of every output file should be `!` followed by a row of `=` signs.
 The banner block should contain:
 - `! SANITISED CONFIGURATION`
-- A bullet list of actions taken (credentials, named objects, and optionally IPs
-  and descriptions depending on flags used)
+- A bullet list of actions taken, derived from which items were actually run
+- A `! The following sanitisation groups were skipped:` block if any entire groups
+  were disabled (not shown when all groups are active)
 - `! Sanitised   :` with a UTC timestamp
 - `! Seed hash   :` with a 16-character hex fingerprint of the seed (not the seed
   itself — the fingerprint is a one-way SHA-256 commitment that allows two files
@@ -542,6 +642,19 @@ To update the repository URL, set `REPO_URL` near the top of the script.
 
 The banner uses `!` as the comment character, which is valid on IOS, IOS XE, and
 IOS XR.
+
+**Selection flags behave correctly**
+When using `--skip-group`, `--only-group`, `--skip-pass`, `--only-pass`, `--skip`,
+or `--only`, verify the following:
+- The startup output lists `Skipped group`, `Skipped pass`, or `Skipped item` lines
+  at the most specific granularity possible (a fully-skipped group is reported as
+  one group line, not as individual items)
+- Items in skipped groups/passes remain unchanged in the output
+- Items in active groups/passes are still correctly sanitised
+- An unknown group, pass, or item name causes an immediate error with the full list
+  of valid names
+- `--skip-group addressing` and `--no-ips` produce identical output
+- `--skip-pass descriptions` and `--no-descriptions` produce identical output
 
 **Credentials removed**
 Search the output for `$1$`, `$5$`, `password 7`, `key 7`, `key 0`, `secret`.

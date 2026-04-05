@@ -173,6 +173,356 @@ def _collect_skip_spans(text: str) -> set[tuple[int, int]]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  SANITISER CONFIGURATION  —  item / pass / group selection
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Hierarchy definition ──────────────────────────────────────────────────────
+#
+# Three-level tree: GROUP → PASS → ITEM
+# Items are the atomic units checked inside pass methods via cfg.enabled(item).
+# Passes are named collections of items.
+# Groups are named collections of passes.
+#
+# Key:  group_id  →  { pass_id  →  [item_id, ...] }
+
+SANITISE_HIERARCHY: dict[str, dict[str, list[str]]] = {
+    "credentials": {
+        "local-auth": [
+            "enable-secret",
+            "username-secrets",
+            "line-passwords",
+        ],
+        "routing-auth": [
+            "ospf-keys",
+            "keychain-keys",
+            "ntp-keys",
+            "bgp-passwords",
+        ],
+        "aaa-keys": [
+            "tacacs-keys",
+            "radius-keys",
+            "server-private-keys",
+        ],
+        "vpn-keys": [
+            "isakmp-keys",
+            "tunnel-keys",
+            "ike-psk",
+        ],
+        "pki": [
+            "pki-cert-blocks",
+            "pki-enrollment",
+            "pki-subject-name",
+        ],
+        "device-identity": [
+            "license-udi",
+        ],
+        "informational": [
+            "banner-body",
+            "call-home-fields",
+        ],
+    },
+    "snmp": {
+        "snmp": [
+            "snmp-communities",
+            "snmp-location",
+            "snmp-contact",
+        ],
+    },
+    "bgp-topology": {
+        "as-numbers": [
+            "bgp-asn",
+            "vrf-rd-rt",
+            "community-values",
+            "bgp-confederation",
+        ],
+    },
+    "named-objects": {
+        "identity": [
+            "hostname",
+            "domain-name",
+            "usernames",
+        ],
+        "routing-policy": [
+            "route-maps",
+            "route-policies",
+            "policy-maps",
+            "class-maps",
+            "prefix-lists",
+            "prefix-sets",
+            "community-lists",
+            "community-sets",
+        ],
+        "bgp-peers": [
+            "peer-groups",
+            "neighbor-groups",
+            "bgp-templates",
+        ],
+        "network-objects": [
+            "vrfs",
+            "acls",
+            "object-groups",
+            "ip-sla",
+            "track-objects",
+        ],
+        "aaa-objects": [
+            "aaa-server-names",
+            "aaa-group-names",
+        ],
+        "crypto-objects": [
+            "crypto-maps",
+            "transform-sets",
+            "pki-trustpoints",
+            "keychains",
+        ],
+    },
+    "addressing": {
+        "ipv4": [
+            "ipv4-addresses",
+        ],
+        "ipv6": [
+            "ipv6-addresses",
+        ],
+    },
+    "descriptions": {
+        "descriptions": [
+            "standalone-descriptions",
+            "inline-descriptions",
+        ],
+    },
+}
+
+# Convenience flat lookups built once at import time
+_ALL_ITEMS:  frozenset[str] = frozenset(
+    item
+    for passes in SANITISE_HIERARCHY.values()
+    for items in passes.values()
+    for item in items
+)
+_ALL_PASSES: frozenset[str] = frozenset(
+    pass_id
+    for passes in SANITISE_HIERARCHY.values()
+    for pass_id in passes
+)
+_ALL_GROUPS: frozenset[str] = frozenset(SANITISE_HIERARCHY)
+
+# Maps pass_id → frozenset of item_ids within it
+_PASS_TO_ITEMS: dict[str, frozenset[str]] = {
+    pass_id: frozenset(items)
+    for passes in SANITISE_HIERARCHY.values()
+    for pass_id, items in passes.items()
+}
+
+# Maps group_id → frozenset of item_ids within it
+_GROUP_TO_ITEMS: dict[str, frozenset[str]] = {
+    group_id: frozenset(
+        item
+        for pass_items in passes.values()
+        for item in pass_items
+    )
+    for group_id, passes in SANITISE_HIERARCHY.items()
+}
+
+# Maps item_id → (group_id, pass_id) for membership queries
+_ITEM_TO_PATH: dict[str, tuple[str, str]] = {
+    item: (group_id, pass_id)
+    for group_id, passes in SANITISE_HIERARCHY.items()
+    for pass_id, items in passes.items()
+    for item in items
+}
+
+
+class SanitiserConfig:
+    """
+    Resolves CLI selection flags into a frozenset of enabled item IDs.
+
+    Precedence (highest wins):  item  >  pass  >  group
+
+    Resolution order applied to the full item set:
+      1. Start with all items enabled
+      2. Apply --skip-group  (disable all items in named groups)
+      3. Apply --only-group  (disable items NOT in named groups)
+      4. Apply --skip-pass   (disable all items in named passes)
+      5. Apply --only-pass   (disable items NOT in named passes)
+      6. Apply --skip        (disable named items individually)
+      7. Apply --only        (disable all items not explicitly named)
+
+    --skip and --only are mutually exclusive at each level.
+    """
+
+    def __init__(
+        self,
+        skip_groups:  list[str] | None = None,
+        only_groups:  list[str] | None = None,
+        skip_passes:  list[str] | None = None,
+        only_passes:  list[str] | None = None,
+        skip_items:   list[str] | None = None,
+        only_items:   list[str] | None = None,
+    ) -> None:
+        enabled = set(_ALL_ITEMS)
+
+        for g in (skip_groups or []):        # step 2
+            enabled -= _GROUP_TO_ITEMS.get(g, frozenset())
+
+        if only_groups:                      # step 3
+            keep = frozenset().union(*(_GROUP_TO_ITEMS.get(g, frozenset())
+                                       for g in only_groups))
+            enabled &= keep
+
+        for p in (skip_passes or []):        # step 4
+            enabled -= _PASS_TO_ITEMS.get(p, frozenset())
+
+        if only_passes:                      # step 5
+            keep = frozenset().union(*(_PASS_TO_ITEMS.get(p, frozenset())
+                                       for p in only_passes))
+            enabled &= keep
+
+        for i in (skip_items or []):         # step 6
+            enabled.discard(i)
+
+        if only_items:                       # step 7
+            enabled &= frozenset(only_items)
+
+        self._enabled: frozenset[str] = frozenset(enabled)
+
+    # ── Querying ──────────────────────────────────────────────────────────
+
+    def enabled(self, item_id: str) -> bool:
+        """Return True if the named item is active."""
+        return item_id in self._enabled
+
+    def pass_has_any(self, pass_id: str) -> bool:
+        """Return True if at least one item in the pass is enabled."""
+        return bool(_PASS_TO_ITEMS.get(pass_id, frozenset()) & self._enabled)
+
+    def group_has_any(self, group_id: str) -> bool:
+        """Return True if at least one item in the group is enabled."""
+        return bool(_GROUP_TO_ITEMS.get(group_id, frozenset()) & self._enabled)
+
+    # ── Introspection (used by banner and startup summary) ────────────────
+
+    def disabled_items(self) -> frozenset[str]:
+        return _ALL_ITEMS - self._enabled
+
+    def disabled_passes(self) -> frozenset[str]:
+        """Passes where ALL items are disabled."""
+        return frozenset(
+            p for p in _ALL_PASSES
+            if not (_PASS_TO_ITEMS[p] & self._enabled)
+        )
+
+    def disabled_groups(self) -> frozenset[str]:
+        """Groups where ALL items are disabled."""
+        return frozenset(
+            g for g in _ALL_GROUPS
+            if not (_GROUP_TO_ITEMS[g] & self._enabled)
+        )
+
+    def summary_lines(self) -> list[str]:
+        """
+        Human-readable summary of what is disabled, used in the startup
+        header. Reports at the coarsest granularity possible: whole groups
+        first, then whole passes, then individual items.
+        """
+        lines = []
+        reported_items: set[str] = set()
+
+        for g in sorted(self.disabled_groups()):
+            lines.append(f"  Skipped group  : {g}")
+            reported_items |= _GROUP_TO_ITEMS[g]
+
+        for p in sorted(self.disabled_passes()):
+            if _PASS_TO_ITEMS[p] <= reported_items:
+                continue   # already covered by a group
+            lines.append(f"  Skipped pass   : {p}")
+            reported_items |= _PASS_TO_ITEMS[p]
+
+        for i in sorted(self.disabled_items()):
+            if i not in reported_items:
+                lines.append(f"  Skipped item   : {i}")
+
+        return lines
+
+    # ── Validation ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def validate(
+        skip_groups:  list[str],
+        only_groups:  list[str],
+        skip_passes:  list[str],
+        only_passes:  list[str],
+        skip_items:   list[str],
+        only_items:   list[str],
+    ) -> list[str]:
+        """Return a list of error strings (empty = valid)."""
+        errors: list[str] = []
+        for name in skip_groups + only_groups:
+            if name not in _ALL_GROUPS:
+                errors.append(
+                    f"Unknown group '{name}'. "
+                    f"Valid: {', '.join(sorted(_ALL_GROUPS))}")
+        for name in skip_passes + only_passes:
+            if name not in _ALL_PASSES:
+                errors.append(
+                    f"Unknown pass '{name}'. "
+                    f"Valid: {', '.join(sorted(_ALL_PASSES))}")
+        for name in skip_items + only_items:
+            if name not in _ALL_ITEMS:
+                errors.append(
+                    f"Unknown item '{name}'. "
+                    f"Valid: {', '.join(sorted(_ALL_ITEMS))}")
+        if skip_groups and only_groups:
+            errors.append("--skip-group and --only-group cannot be combined.")
+        if skip_passes and only_passes:
+            errors.append("--skip-pass and --only-pass cannot be combined.")
+        if skip_items and only_items:
+            errors.append("--skip and --only cannot be combined.")
+        return errors
+
+    @classmethod
+    def default(cls) -> "SanitiserConfig":
+        """All items enabled — equivalent to running with no selection flags."""
+        return cls()
+
+    @classmethod
+    def from_args(cls, args: "argparse.Namespace") -> "SanitiserConfig":
+        """
+        Construct from parsed CLI args, handling legacy flag aliases.
+        --no-ips          →  --skip-group addressing
+        --no-descriptions →  --skip-pass  descriptions
+        """
+        skip_groups = list(args.skip_group)
+        only_groups = list(args.only_group)
+        skip_passes = list(args.skip_pass)
+        only_passes = list(args.only_pass)
+        skip_items  = list(args.skip)
+        only_items  = list(args.only)
+
+        if getattr(args, "no_ips", False):
+            skip_groups.append("addressing")
+        if getattr(args, "no_descriptions", False):
+            skip_passes.append("descriptions")
+
+        errors = cls.validate(
+            skip_groups, only_groups,
+            skip_passes, only_passes,
+            skip_items,  only_items,
+        )
+        if errors:
+            for e in errors:
+                print(f"  ERROR: {e}", file=sys.stderr)
+            sys.exit(2)
+
+        return cls(
+            skip_groups=skip_groups,
+            only_groups=only_groups,
+            skip_passes=skip_passes,
+            only_passes=only_passes,
+            skip_items=skip_items,
+            only_items=only_items,
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  TOKEN GENERATOR  —  deterministic, collision-safe, double-anonymisation-safe
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -298,28 +648,40 @@ class IPAnonymiser:
 
 class CiscoSanitiser:
     def __init__(self, seed: str = "cisco-sanitise",
-                 anonymise_ips: bool = True,
-                 anonymise_descriptions: bool = True):
+                 cfg: SanitiserConfig | None = None):
         self.tokens = TokenGenerator(seed=seed)
-        self.ip_anon = IPAnonymiser(self.tokens) if anonymise_ips else None
-        self.anonymise_descriptions = anonymise_descriptions
+        self._cfg   = cfg if cfg is not None else SanitiserConfig.default()
+        self.ip_anon = (
+            IPAnonymiser(self.tokens)
+            if self._cfg.group_has_any("addressing") else None
+        )
         self._log: list[str] = []
+
+    # Convenience properties for backward-compatible external access
+    @property
+    def anonymise_descriptions(self) -> bool:
+        return self._cfg.pass_has_any("descriptions")
 
     # ─────────────────────────────────────────── public ──────────────────
 
     def process(self, text: str) -> str:
         self._log = []
         text = self._pass_credentials(text)
-        text = self._pass_snmp(text)
-        text = self._pass_as_numbers(text)
-        text = self._pass_named_objects(text)
-        if self.anonymise_descriptions:
+        if self._cfg.pass_has_any("snmp"):
+            text = self._pass_snmp(text)
+        if self._cfg.pass_has_any("as-numbers"):
+            text = self._pass_as_numbers(text)
+        if self._cfg.group_has_any("named-objects"):
+            text = self._pass_named_objects(text)
+        if self._cfg.pass_has_any("descriptions"):
             text = self._pass_descriptions(text)
         if self.ip_anon:
-            text = self.ip_anon.anonymise(text)
-            self._log.append("  [IP]  IPv4 host addresses anonymised")
-            text = self.ip_anon.anonymise_v6(text)
-            self._log.append("  [IP]  IPv6 host addresses anonymised")
+            if self._cfg.enabled("ipv4-addresses"):
+                text = self.ip_anon.anonymise(text)
+                self._log.append("  [IP]  IPv4 host addresses anonymised")
+            if self._cfg.enabled("ipv6-addresses"):
+                text = self.ip_anon.anonymise_v6(text)
+                self._log.append("  [IP]  IPv6 host addresses anonymised")
         return text
 
     @property
@@ -363,158 +725,150 @@ class CiscoSanitiser:
 
     def _pass_credentials(self, text: str) -> str:
         S = self._sub
+        cfg = self._cfg
 
-        # enable secret / enable password
-        text = S(re.compile(
-            r'^(enable\s+(?:secret|password)\s+(?:\d+\s+)?)\S+', re.M),
-            r'\1<REMOVED>', text, "enable secret/password")
-
-        # username … secret/password — credential value only, username preserved
-        # for anonymisation in named-objects pass
-        text = S(re.compile(
-            r'^(username\s+\S+(?:\s+privilege\s+\d+)?'
-            r'\s+(?:secret|password)\s+(?:\d+\s+)?)\S+', re.M),
-            r'\1<REMOVED>', text, "username secret/password")
-
-        # IOS XR username block: " secret [N] <hash>"
-        text = S(re.compile(r'^(\s+secret[^\S\n]+(?:[0-9][^\S\n]+)?)\S+', re.M),
-            r'\1<REMOVED>', text, "XR username secret block")
-
-        # IOS XR username block: " password N <val>"
-        text = S(re.compile(r'^(\s+password[^\S\n]+\d+[^\S\n]+)\S+', re.M),
-            r'\1<REMOVED>', text, "XR username password block")
-
-        # line vty/con password  (catch-all for remaining password lines)
-        # Negative lookahead prevents matching "password encrypted ..." lines
-        # (those are handled by the XR BGP password rule later)
-        text = S(re.compile(r'^(\s+password[^\S\n]+(?:\d+[^\S\n]+)?)(?!encrypted\b)\S+', re.M),
-            r'\1<REMOVED>', text, "line password")
-
-        # OSPF message-digest-key
-        text = S(re.compile(
-            r'^(\s+ip\s+ospf\s+message-digest-key[^\S\n]+\d+[^\S\n]+md5[^\S\n]+(?:\d+[^\S\n]+)?)\S+', re.M),
-            r'\1<REMOVED>', text, "OSPF message-digest-key")
-
-        # IOS/XE keychain: "key-string [N] <val>"  — NOT "key-string password …"
-        text = S(re.compile(
-            r'^(\s+key-string[^\S\n]+)(?!password\b)(?:\d+[^\S\n]+)?\S+', re.M),
-            r'\1<REMOVED>', text, "keychain key-string (IOS/XE)")
-
-        # IOS XR keychain: "key-string password N <val>"
-        text = S(re.compile(
-            r'^(\s+key-string[^\S\n]+password[^\S\n]+\d+[^\S\n]+)\S+', re.M),
-            r'\1<REMOVED>', text, "keychain key-string password (XR)")
-
-        # NTP authentication-key — must come BEFORE the generic authentication-key
-        # rule to handle the trailing type-digit correctly.
-        # Handles both:
-        #   ntp authentication-key 1 md5 <key>          (IOS/XE — no trailing digit)
-        #   ntp authentication-key 1 md5 <key> 7        (IOS — trailing type digit)
-        text = S(re.compile(
-            r'^(\s*(?:ntp\s+)?authentication-key\s+\d+\s+md5\s+)'
-            r'(?!encrypted\b)(\S+)(\s+\d+)?$', re.M),
-            lambda m: m.group(1) + '<REMOVED>' + (m.group(3) or ''),
-            text, "NTP authentication-key (IOS/XE)")
-
-        # IOS XR: "authentication-key N md5 encrypted <val>"  — MUST be before generic rule
-        text = S(re.compile(
-            r'^(\s*(?:ntp\s+)?authentication-key\s+\d+\s+md5\s+encrypted\s+)\S+', re.M),
-            r'\1<REMOVED>', text, "authentication-key md5 encrypted (XR)")
-
-        # Generic OSPF/IS-IS authentication-key (indented, no md5 qualifier)
-        # Requires a digit immediately after the keyword to avoid eating 'md5'
-        text = S(re.compile(
-            r'^(\s+authentication-key\s+\d+\s+)(?!md5\b)\S+', re.M),
-            r'\1<REMOVED>', text, "authentication-key (generic)")
-
-        # Block-style AAA server key (inside tacacs server / radius server stanza)
-        # Use [^\S\n]+ to prevent the digit+whitespace from crossing a newline
-        text = S(re.compile(r'^(\s+key[^\S\n]+(?:\d+[^\S\n]+)?)\S+', re.M),
-            r'\1<REMOVED>', text, "AAA server key (block)")
-
-        # Flat-style tacacs-server key (IOS)
-        text = S(re.compile(
-            r'^(tacacs-server\s+(?:host\s+\S+\s+)?key[^\S\n]+(?:\d+[^\S\n]+)?)\S+', re.M),
-            r'\1<REMOVED>', text, "tacacs-server key")
-
-        # Flat-style radius-server key (IOS)
-        # host <ip> [<auth-port>] key ... — the port tokens are optional
-        text = S(re.compile(
-            r'^(radius-server\s+(?:host\s+\S+(?:\s+\S+)*?\s+)?key[^\S\n]+(?:\d+[^\S\n]+)?)\S+', re.M),
-            r'\1<REMOVED>', text, "radius-server key")
-
-        # BGP neighbor password (IOS/XE inline)
-        text = S(re.compile(
-            r'^(\s+neighbor\s+\S+[^\S\n]+password[^\S\n]+(?:\d+[^\S\n]+)?)\S+', re.M),
-            r'\1<REMOVED>', text, "BGP neighbor password")
-
-        # IOS XR BGP: "  password encrypted <val>" or "  password 0 <val>"
-        # [^\S\n]+ prevents crossing newlines
-        text = S(re.compile(
-            r'^(\s+password[^\S\n]+(?:encrypted[^\S\n]+|\d+[^\S\n]+))\S+', re.M),
-            r'\1<REMOVED>', text, "XR BGP password (neighbor block)")
-
-        # IKE pre-shared-key
-        text = S(re.compile(
-            r'^(\s*pre-shared-key\s+(?:address\s+\S+\s+|local\s+|remote\s+)?'
-            r'(?:\d+[^\S\n]+)?)\S+', re.M),
-            r'\1<REMOVED>', text, "IKE pre-shared-key")
-
-        # crypto isakmp key <key> address <ip>
-        text = S(re.compile(r'^(crypto\s+isakmp\s+key\s+)\S+', re.M),
-            r'\1<REMOVED>', text, "crypto isakmp key")
-
-        # tunnel key
-        text = S(re.compile(r'^(\s*tunnel\s+key\s+)\S+', re.M),
-            r'\1<REMOVED>', text, "tunnel key")
-
-        # PKI certificate blocks
-        text = S(re.compile(
-            r'^\s*certificate\s+(?:self-signed\s+)?\S+\n.*?^\s*quit',
-            re.M | re.DOTALL),
-            ' certificate <REMOVED>\n  quit', text, "PKI certificate block")
-
-        # PKI trustpoint: enrollment url
-        text = S(re.compile(r'^(\s*enrollment\s+url\s+)\S+', re.M),
-            r'\1<REMOVED>', text, "PKI enrollment url")
-
-        # PKI trustpoint: subject-name (free text, rest of line)
-        text = S(re.compile(r'^(\s*subject-name\s+).+$', re.M),
-            r'\1<REMOVED>', text, "PKI subject-name")
-
-        # server-private key inside aaa group server blocks
-        # e.g. " server-private 10.x.x.x [port N] key [N] <val>"
-        text = S(re.compile(
-            r'^(\s+server-private\s+\S+(?:\s+(?:auth-port|acct-port|port|timeout)\s+\d+)*'
-            r'\s+key[^\S\n]+(?:\d+[^\S\n]+)?)\S+', re.M),
-            r'\1<REMOVED>', text, "AAA server-private key")
-
-        # banner body text (motd / login / exec / incoming)
-        # Cisco banners: "banner WORD DELIM\n...body...\nDELIM"
-        # The delimiter is the token immediately after the banner keyword (e.g. ^C, #, %)
-        # Use a backreference to match the closing delimiter on its own line.
-        def _redact_banner(m: re.Match) -> str:
-            return m.group(1) + '<REMOVED>' + m.group(4)
-        text = S(re.compile(
-            r'^(banner\s+\w+\s+(\S+)\n)(.*?)(\n\2\s*$)',
-            re.M | re.DOTALL),
-            _redact_banner, text, "banner body")
-
-        # call-home sensitive fields
-        for kw in ('contact-email-addr', 'street-address', 'site-id',
-                   'customer-id', 'phone-number', 'contract-id'):
+        # ── local-auth ────────────────────────────────────────────────────
+        if cfg.enabled("enable-secret"):
             text = S(re.compile(
-                rf'^(\s*{re.escape(kw)}\s+).+$', re.M),
-                r'\1<REMOVED>', text, f"call-home {kw}")
+                r'^(enable\s+(?:secret|password)\s+(?:\d+\s+)?)\S+', re.M),
+                r'\1<REMOVED>', text, "enable secret/password")
 
-        # Smart Licensing UDI — written to running-config by IOS/IOS XE.
-        # Format: license udi pid <PRODUCT-ID> sn <SERIAL-NUMBER>
-        # Both PID and serial number uniquely identify the physical device
-        # and must be redacted. The keywords 'pid' and 'sn' are preserved
-        # so the reader can see which field was in each position.
-        text = S(re.compile(
-            r'^(license\s+udi\s+pid\s+)\S+(\s+sn\s+)\S+', re.M),
-            r'\1<REMOVED>\2<REMOVED>', text, "license udi (pid + sn)")
+        if cfg.enabled("username-secrets"):
+            text = S(re.compile(
+                r'^(username\s+\S+(?:\s+privilege\s+\d+)?'
+                r'\s+(?:secret|password)\s+(?:\d+\s+)?)\S+', re.M),
+                r'\1<REMOVED>', text, "username secret/password")
+
+            # IOS XR username block: " secret [N] <hash>"
+            text = S(re.compile(r'^(\s+secret[^\S\n]+(?:[0-9][^\S\n]+)?)\S+', re.M),
+                r'\1<REMOVED>', text, "XR username secret block")
+
+            # IOS XR username block: " password N <val>"
+            text = S(re.compile(r'^(\s+password[^\S\n]+\d+[^\S\n]+)\S+', re.M),
+                r'\1<REMOVED>', text, "XR username password block")
+
+        if cfg.enabled("line-passwords"):
+            # line vty/con password  (catch-all for remaining password lines)
+            # Negative lookahead prevents matching "password encrypted ..." lines
+            text = S(re.compile(
+                r'^(\s+password[^\S\n]+(?:\d+[^\S\n]+)?)(?!encrypted\b)\S+', re.M),
+                r'\1<REMOVED>', text, "line password")
+
+        # ── routing-auth ──────────────────────────────────────────────────
+        if cfg.enabled("ospf-keys"):
+            text = S(re.compile(
+                r'^(\s+ip\s+ospf\s+message-digest-key[^\S\n]+\d+[^\S\n]+md5[^\S\n]+(?:\d+[^\S\n]+)?)\S+', re.M),
+                r'\1<REMOVED>', text, "OSPF message-digest-key")
+
+        if cfg.enabled("keychain-keys"):
+            # IOS/XE keychain: "key-string [N] <val>"  — NOT "key-string password …"
+            text = S(re.compile(
+                r'^(\s+key-string[^\S\n]+)(?!password\b)(?:\d+[^\S\n]+)?\S+', re.M),
+                r'\1<REMOVED>', text, "keychain key-string (IOS/XE)")
+            # IOS XR keychain: "key-string password N <val>"
+            text = S(re.compile(
+                r'^(\s+key-string[^\S\n]+password[^\S\n]+\d+[^\S\n]+)\S+', re.M),
+                r'\1<REMOVED>', text, "keychain key-string password (XR)")
+
+        if cfg.enabled("ntp-keys"):
+            # NTP authentication-key — must come BEFORE the generic rule
+            text = S(re.compile(
+                r'^(\s*(?:ntp\s+)?authentication-key\s+\d+\s+md5\s+)'
+                r'(?!encrypted\b)(\S+)(\s+\d+)?$', re.M),
+                lambda m: m.group(1) + '<REMOVED>' + (m.group(3) or ''),
+                text, "NTP authentication-key (IOS/XE)")
+            # IOS XR: "authentication-key N md5 encrypted <val>"
+            text = S(re.compile(
+                r'^(\s*(?:ntp\s+)?authentication-key\s+\d+\s+md5\s+encrypted\s+)\S+', re.M),
+                r'\1<REMOVED>', text, "authentication-key md5 encrypted (XR)")
+            # Generic OSPF/IS-IS authentication-key (indented, no md5 qualifier)
+            text = S(re.compile(
+                r'^(\s+authentication-key\s+\d+\s+)(?!md5\b)\S+', re.M),
+                r'\1<REMOVED>', text, "authentication-key (generic)")
+
+        if cfg.enabled("bgp-passwords"):
+            # BGP neighbor password (IOS/XE inline)
+            text = S(re.compile(
+                r'^(\s+neighbor\s+\S+[^\S\n]+password[^\S\n]+(?:\d+[^\S\n]+)?)\S+', re.M),
+                r'\1<REMOVED>', text, "BGP neighbor password")
+            # IOS XR BGP: "  password encrypted <val>" or "  password 0 <val>"
+            text = S(re.compile(
+                r'^(\s+password[^\S\n]+(?:encrypted[^\S\n]+|\d+[^\S\n]+))\S+', re.M),
+                r'\1<REMOVED>', text, "XR BGP password (neighbor block)")
+
+        # ── aaa-keys ──────────────────────────────────────────────────────
+        if cfg.enabled("tacacs-keys") or cfg.enabled("radius-keys"):
+            # Block-style AAA server key (inside tacacs server / radius server stanza)
+            text = S(re.compile(r'^(\s+key[^\S\n]+(?:\d+[^\S\n]+)?)\S+', re.M),
+                r'\1<REMOVED>', text, "AAA server key (block)")
+
+        if cfg.enabled("tacacs-keys"):
+            text = S(re.compile(
+                r'^(tacacs-server\s+(?:host\s+\S+\s+)?key[^\S\n]+(?:\d+[^\S\n]+)?)\S+', re.M),
+                r'\1<REMOVED>', text, "tacacs-server key")
+
+        if cfg.enabled("radius-keys"):
+            text = S(re.compile(
+                r'^(radius-server\s+(?:host\s+\S+(?:\s+\S+)*?\s+)?key[^\S\n]+(?:\d+[^\S\n]+)?)\S+', re.M),
+                r'\1<REMOVED>', text, "radius-server key")
+
+        if cfg.enabled("server-private-keys"):
+            text = S(re.compile(
+                r'^(\s+server-private\s+\S+(?:\s+(?:auth-port|acct-port|port|timeout)\s+\d+)*'
+                r'\s+key[^\S\n]+(?:\d+[^\S\n]+)?)\S+', re.M),
+                r'\1<REMOVED>', text, "AAA server-private key")
+
+        # ── vpn-keys ──────────────────────────────────────────────────────
+        if cfg.enabled("ike-psk"):
+            text = S(re.compile(
+                r'^(\s*pre-shared-key\s+(?:address\s+\S+\s+|local\s+|remote\s+)?'
+                r'(?:\d+[^\S\n]+)?)\S+', re.M),
+                r'\1<REMOVED>', text, "IKE pre-shared-key")
+
+        if cfg.enabled("isakmp-keys"):
+            text = S(re.compile(r'^(crypto\s+isakmp\s+key\s+)\S+', re.M),
+                r'\1<REMOVED>', text, "crypto isakmp key")
+
+        if cfg.enabled("tunnel-keys"):
+            text = S(re.compile(r'^(\s*tunnel\s+key\s+)\S+', re.M),
+                r'\1<REMOVED>', text, "tunnel key")
+
+        # ── pki ───────────────────────────────────────────────────────────
+        if cfg.enabled("pki-cert-blocks"):
+            text = S(re.compile(
+                r'^\s*certificate\s+(?:self-signed\s+)?\S+\n.*?^\s*quit',
+                re.M | re.DOTALL),
+                ' certificate <REMOVED>\n  quit', text, "PKI certificate block")
+
+        if cfg.enabled("pki-enrollment"):
+            text = S(re.compile(r'^(\s*enrollment\s+url\s+)\S+', re.M),
+                r'\1<REMOVED>', text, "PKI enrollment url")
+
+        if cfg.enabled("pki-subject-name"):
+            text = S(re.compile(r'^(\s*subject-name\s+).+$', re.M),
+                r'\1<REMOVED>', text, "PKI subject-name")
+
+        # ── informational ─────────────────────────────────────────────────
+        if cfg.enabled("banner-body"):
+            def _redact_banner(m: re.Match) -> str:
+                return m.group(1) + '<REMOVED>' + m.group(4)
+            text = S(re.compile(
+                r'^(banner\s+\w+\s+(\S+)\n)(.*?)(\n\2\s*$)',
+                re.M | re.DOTALL),
+                _redact_banner, text, "banner body")
+
+        if cfg.enabled("call-home-fields"):
+            for kw in ('contact-email-addr', 'street-address', 'site-id',
+                       'customer-id', 'phone-number', 'contract-id'):
+                text = S(re.compile(
+                    rf'^(\s*{re.escape(kw)}\s+).+$', re.M),
+                    r'\1<REMOVED>', text, f"call-home {kw}")
+
+        # ── device-identity ───────────────────────────────────────────────
+        if cfg.enabled("license-udi"):
+            text = S(re.compile(
+                r'^(license\s+udi\s+pid\s+)\S+(\s+sn\s+)\S+', re.M),
+                r'\1<REMOVED>\2<REMOVED>', text, "license udi (pid + sn)")
 
         return text
 
@@ -527,41 +881,34 @@ class CiscoSanitiser:
         """
         N = self._sub_name
         S = self._sub
+        cfg = self._cfg
 
-        # IOS/XE: "snmp-server community <name> RO|RW ..."
-        # Tokenise the community name so host-line refs match
-        text = N(re.compile(r'^(snmp-server\s+community\s+)(?P<n>\S+)', re.M),
-                 "snmp_community", "SNMP community def (IOS/XE)", text)
+        if cfg.enabled("snmp-communities"):
+            text = N(re.compile(r'^(snmp-server\s+community\s+)(?P<n>\S+)', re.M),
+                     "snmp_community", "SNMP community def (IOS/XE)", text)
+            text = N(re.compile(r'^(snmp-server\s+community\s+)(?P<n>\S+)', re.M),
+                     "snmp_community", "SNMP community def (XR)", text)
+            text = N(re.compile(
+                r'^(snmp-server\s+community\s+\S+\s+(?:RO|RW)\s+)(?P<n>[A-Za-z]\S*)', re.M),
+                     "acl", "SNMP community ACL ref", text)
+            text = N(re.compile(
+                r'^(snmp-server\s+host\s+\S+\s+(?:version\s+\S+\s+)?)(?P<n>\S+)', re.M),
+                     "snmp_community", "SNMP community host ref", text)
 
-        # IOS XR block: "snmp-server community <name>" (name on its own line)
-        text = N(re.compile(r'^(snmp-server\s+community\s+)(?P<n>\S+)', re.M),
-                 "snmp_community", "SNMP community def (XR)", text)
+        if cfg.enabled("snmp-location"):
+            text = S(re.compile(r'^(snmp-server\s+location\s+).+$', re.M),
+                r'\1<REMOVED>', text, "SNMP location")
 
-        # Named ACL after RO/RW on community line (community is already tokenised above)
-        # e.g. "snmp-server community snmp-xxxx RO SNMP-ACCESS-LIST"
-        # Only match alpha-starting names; numeric ACLs are left unchanged
-        text = N(re.compile(
-            r'^(snmp-server\s+community\s+\S+\s+(?:RO|RW)\s+)(?P<n>[A-Za-z]\S*)', re.M),
-                 "acl", "SNMP community ACL ref", text)
-
-        # snmp-server host <ip> version 2c <community>
-        text = N(re.compile(
-            r'^(snmp-server\s+host\s+\S+\s+(?:version\s+\S+\s+)?)(?P<n>\S+)', re.M),
-                 "snmp_community", "SNMP community host ref", text)
-
-        # SNMP location — redact free text
-        text = S(re.compile(r'^(snmp-server\s+location\s+).+$', re.M),
-            r'\1<REMOVED>', text, "SNMP location")
-
-        # SNMP contact — redact free text (may be quoted)
-        text = S(re.compile(r'^(snmp-server\s+contact\s+).+$', re.M),
-            r'\1<REMOVED>', text, "SNMP contact")
+        if cfg.enabled("snmp-contact"):
+            text = S(re.compile(r'^(snmp-server\s+contact\s+).+$', re.M),
+                r'\1<REMOVED>', text, "SNMP contact")
 
         return text
 
     # ──────────────────────────────── pass 3: AS numbers ─────────────────
 
     def _pass_as_numbers(self, text: str) -> str:
+        cfg = self._cfg
 
         def replace_as(m: re.Match) -> str:
             return m.group(1) + self.tokens.get("as_number", m.group(2))
@@ -571,73 +918,57 @@ class CiscoSanitiser:
                     + self.tokens.get("as_number", m.group(2))
                     + m.group(3))
 
-        # router bgp <AS>
-        text = self._sub(
-            re.compile(r'^(router\s+bgp\s+)(\d+(?:\.\d+)?)', re.M),
-            replace_as, text, "router bgp AS")
+        if cfg.enabled("bgp-asn"):
+            text = self._sub(
+                re.compile(r'^(router\s+bgp\s+)(\d+(?:\.\d+)?)', re.M),
+                replace_as, text, "router bgp AS")
+            text = self._sub(
+                re.compile(r'^(\s*bgp\s+local-as\s+)(\d+(?:\.\d+)?)', re.M),
+                replace_as, text, "bgp local-as")
+            text = self._sub(
+                re.compile(r'^(\s+(?:neighbor\s+\S+\s+)?remote-as\s+)(\d+(?:\.\d+)?)', re.M),
+                replace_as, text, "remote-as")
 
-        # bgp confederation identifier <AS>
-        text = self._sub(
-            re.compile(r'^(\s*bgp\s+confederation\s+identifier\s+)(\d+(?:\.\d+)?)', re.M),
-            replace_as, text, "bgp confederation identifier")
+        if cfg.enabled("bgp-confederation"):
+            text = self._sub(
+                re.compile(r'^(\s*bgp\s+confederation\s+identifier\s+)(\d+(?:\.\d+)?)', re.M),
+                replace_as, text, "bgp confederation identifier")
+            def replace_confederation_peers(m: re.Match) -> str:
+                prefix = m.group(1)
+                peers = re.sub(
+                    r'\d+(?:\.\d+)?',
+                    lambda a: self.tokens.get("as_number", a.group(0)),
+                    m.group(2))
+                return prefix + peers
+            text = self._sub(
+                re.compile(r'^(\s*bgp\s+confederation\s+peers\s+)(.+)$', re.M),
+                replace_confederation_peers, text, "bgp confederation peers")
 
-        # bgp confederation peers <AS> [<AS> ...]  — replace each AS on the line
-        def replace_confederation_peers(m: re.Match) -> str:
-            prefix = m.group(1)
-            peers = re.sub(
-                r'\d+(?:\.\d+)?',
-                lambda a: self.tokens.get("as_number", a.group(0)),
-                m.group(2))
-            return prefix + peers
-        text = self._sub(
-            re.compile(r'^(\s*bgp\s+confederation\s+peers\s+)(.+)$', re.M),
-            replace_confederation_peers, text, "bgp confederation peers")
+        if cfg.enabled("vrf-rd-rt"):
+            text = self._sub(
+                re.compile(r'(\brd\s+)(\d+(?:\.\d+)?)(\s*:\s*\d+)', re.M),
+                replace_rt, text, "VRF rd")
+            text = self._sub(
+                re.compile(
+                    r'(\broute-target\s+(?:export|import)\s+)(\d+(?:\.\d+)?)(\s*:\s*\d+)', re.M),
+                replace_rt, text, "route-target")
+            text = self._sub(
+                re.compile(r'^(\s{3,})(\d+(?:\.\d+)?)(:\d+\s*$)', re.M),
+                replace_rt, text, "XR route-target value")
 
-        # bgp local-as <AS> [no-prepend [replace-as [dual-as]]]
-        text = self._sub(
-            re.compile(r'^(\s*bgp\s+local-as\s+)(\d+(?:\.\d+)?)', re.M),
-            replace_as, text, "bgp local-as")
-
-        # neighbor … remote-as <AS>
-        text = self._sub(
-            re.compile(r'^(\s+(?:neighbor\s+\S+\s+)?remote-as\s+)(\d+(?:\.\d+)?)', re.M),
-            replace_as, text, "remote-as")
-
-        # VRF rd <AS>:<tag>
-        text = self._sub(
-            re.compile(r'(\brd\s+)(\d+(?:\.\d+)?)(\s*:\s*\d+)', re.M),
-            replace_rt, text, "VRF rd")
-
-        # route-target export/import <AS>:<tag>
-        text = self._sub(
-            re.compile(
-                r'(\broute-target\s+(?:export|import)\s+)(\d+(?:\.\d+)?)(\s*:\s*\d+)', re.M),
-            replace_rt, text, "route-target")
-
-        # IOS XR bare route-target value lines, e.g. "   65001:100" (3+ spaces)
-        text = self._sub(
-            re.compile(r'^(\s{3,})(\d+(?:\.\d+)?)(:\d+\s*$)', re.M),
-            replace_rt, text, "XR route-target value")
-
-        # IOS XR community-set value lines, e.g. "  65001:1000" (2+ spaces, no keyword)
-        text = self._sub(
-            re.compile(r'^(\s{2,})(\d+(?:\.\d+)?)(:\d+),?\s*$', re.M),
-            replace_rt, text, "XR community-set value")
-
-        # community-list / community-set value lines, e.g. "permit 65001:1000"
-        # or inline on definition line "ip community-list standard NAME permit 65001:1000"
-        text = self._sub(
-            re.compile(r'(\bpermit\s+)(\d+(?:\.\d+)?)(:\d+)', re.M),
-            replace_rt, text, "community permit AS:tag")
-
-        text = self._sub(
-            re.compile(r'(\bdeny\s+)(\d+(?:\.\d+)?)(:\d+)', re.M),
-            replace_rt, text, "community deny AS:tag")
-
-        # route-map "set community AS:tag" (bare number:number, no permit/deny keyword)
-        text = self._sub(
-            re.compile(r'(\bset\s+community\s+)(\d+(?:\.\d+)?)(:\d+)', re.M),
-            replace_rt, text, "set community AS:tag")
+        if cfg.enabled("community-values"):
+            text = self._sub(
+                re.compile(r'^(\s{2,})(\d+(?:\.\d+)?)(:\d+),?\s*$', re.M),
+                replace_rt, text, "XR community-set value")
+            text = self._sub(
+                re.compile(r'(\bpermit\s+)(\d+(?:\.\d+)?)(:\d+)', re.M),
+                replace_rt, text, "community permit AS:tag")
+            text = self._sub(
+                re.compile(r'(\bdeny\s+)(\d+(?:\.\d+)?)(:\d+)', re.M),
+                replace_rt, text, "community deny AS:tag")
+            text = self._sub(
+                re.compile(r'(\bset\s+community\s+)(\d+(?:\.\d+)?)(:\d+)', re.M),
+                replace_rt, text, "set community AS:tag")
 
         return text
 
@@ -645,277 +976,221 @@ class CiscoSanitiser:
 
     def _pass_named_objects(self, text: str) -> str:
         N = self._sub_name
+        cfg = self._cfg
 
-        # ── Hostname / domain ─────────────────────────────────────────────
-        text = N(re.compile(r'^(hostname\s+)(?P<n>\S+)', re.M),
-                 "hostname", "hostname", text)
+        # ── identity ──────────────────────────────────────────────────────
+        if cfg.enabled("hostname"):
+            text = N(re.compile(r'^(hostname\s+)(?P<n>\S+)', re.M),
+                     "hostname", "hostname", text)
 
-        # IOS/XE: "ip domain-name" or "ip domain name"
-        text = N(re.compile(r'^(ip\s+domain[- ]name\s+)(?P<n>\S+)', re.M),
-                 "domain", "ip domain-name (IOS/XE)", text)
+        if cfg.enabled("domain-name"):
+            text = N(re.compile(r'^(ip\s+domain[- ]name\s+)(?P<n>\S+)', re.M),
+                     "domain", "ip domain-name (IOS/XE)", text)
+            text = N(re.compile(r'^(domain\s+name\s+)(?P<n>\S+)', re.M),
+                     "domain", "domain name (XR)", text)
 
-        # IOS XR: "domain name"
-        text = N(re.compile(r'^(domain\s+name\s+)(?P<n>\S+)', re.M),
-                 "domain", "domain name (XR)", text)
+        if cfg.enabled("usernames"):
+            text = N(re.compile(r'^(username\s+)(?P<n>\S+)', re.M),
+                     "username", "username (IOS/XE)", text)
+            text = N(re.compile(r'^(username\s+)(?P<n>\S+)', re.M),
+                     "username", "username (XR)", text)
 
-        # ── Usernames ─────────────────────────────────────────────────────
-        # IOS/XE: "username NAME ..."
-        text = N(re.compile(r'^(username\s+)(?P<n>\S+)', re.M),
-                 "username", "username (IOS/XE)", text)
+        # ── aaa-objects ───────────────────────────────────────────────────
+        if cfg.enabled("aaa-server-names"):
+            text = N(re.compile(r'^(tacacs\s+server\s+)(?P<n>\S+)', re.M),
+                     "aaa_server", "tacacs server name", text)
+            text = N(re.compile(r'^(radius\s+server\s+)(?P<n>\S+)', re.M),
+                     "aaa_server", "radius server name", text)
 
-        # IOS XR: "username" block header
-        text = N(re.compile(r'^(username\s+)(?P<n>\S+)', re.M),
-                 "username", "username (XR)", text)
+        if cfg.enabled("aaa-group-names"):
+            text = N(re.compile(
+                r'^(aaa\s+group\s+server\s+\S+\s+)(?P<n>\S+)', re.M),
+                     "aaa_group", "aaa group server name", text)
+            text = N(re.compile(
+                r'(\baaa\s+(?:authentication|authorization|accounting)\s+\S+\s+\S+\s+group\s+)'
+                r'(?P<n>(?!tacacs\+?\b|radius\b|ldap\b|local\b)\S+)', re.M),
+                     "aaa_group", "aaa group ref", text)
 
-        # ── AAA server block names ────────────────────────────────────────
-        # "tacacs server NAME" / "radius server NAME"
-        text = N(re.compile(r'^(tacacs\s+server\s+)(?P<n>\S+)', re.M),
-                 "aaa_server", "tacacs server name", text)
+        # ── network-objects / vrfs ────────────────────────────────────────
+        if cfg.enabled("vrfs"):
+            text = N(re.compile(r'^(vrf\s+definition\s+)(?P<n>\S+)', re.M),
+                     "vrf", "vrf definition (XE)", text)
+            text = N(re.compile(r'^(ip\s+vrf\s+)(?P<n>\S+)', re.M),
+                     "vrf", "ip vrf (IOS)", text)
+            text = N(re.compile(
+                r'^(vrf\s+)(?P<n>(?!definition\b|forwarding\b|member\b)\S+)', re.M),
+                     "vrf", "vrf (XR top-level)", text)
+            text = N(re.compile(r'^(\s+vrf\s+forwarding\s+)(?P<n>\S+)', re.M),
+                     "vrf", "vrf forwarding (XE)", text)
+            text = N(re.compile(r'^(\s+ip\s+vrf\s+forwarding\s+)(?P<n>\S+)', re.M),
+                     "vrf", "ip vrf forwarding (IOS)", text)
+            text = N(re.compile(
+                r'^(\s+vrf\s+)(?P<n>(?!forwarding\b|member\b)\S+)', re.M),
+                     "vrf", "vrf ref (XR interface)", text)
+            text = N(re.compile(
+                r'(\baddress-family\s+\S+(?:\s+\S+)?\s+vrf\s+)(?P<n>\S+)', re.M),
+                     "vrf", "address-family vrf", text)
+            text = N(re.compile(r'(\s+vrf\s+)(?P<n>\S+)(?=\s*$)', re.M),
+                     "vrf", "trailing vrf ref", text)
 
-        text = N(re.compile(r'^(radius\s+server\s+)(?P<n>\S+)', re.M),
-                 "aaa_server", "radius server name", text)
+        # ── routing-policy ────────────────────────────────────────────────
+        if cfg.enabled("route-maps"):
+            text = N(re.compile(r'^(route-map\s+)(?P<n>\S+)', re.M),
+                     "route_map", "route-map def", text)
+            text = N(re.compile(
+                r'(\broute-map\s+)(?P<n>\S+)(?=\s+(?:in|out|permit|deny|\d))', re.M),
+                     "route_map", "route-map ref", text)
 
-        # ── AAA group block names ──────────────────────────────────────────
-        # "aaa group server tacacs+ NAME" / "aaa group server radius NAME"
-        text = N(re.compile(
-            r'^(aaa\s+group\s+server\s+\S+\s+)(?P<n>\S+)', re.M),
-                 "aaa_group", "aaa group server name", text)
+        if cfg.enabled("route-policies"):
+            text = N(re.compile(r'^(route-policy\s+)(?P<n>\S+)', re.M),
+                     "route_map", "route-policy def (XR)", text)
+            text = N(re.compile(r'(\broute-policy\s+)(?P<n>\S+)', re.M),
+                     "route_map", "route-policy ref (XR)", text)
 
-        # References in aaa authentication/authorization/accounting lines
-        # e.g. "aaa authentication login default group NAME local"
-        text = N(re.compile(
-            r'(\baaa\s+(?:authentication|authorization|accounting)\s+\S+\s+\S+\s+group\s+)'
-            r'(?P<n>(?!tacacs\+?\b|radius\b|ldap\b|local\b)\S+)', re.M),
-                 "aaa_group", "aaa group ref", text)
+        if cfg.enabled("policy-maps"):
+            text = N(re.compile(r'^(policy-map\s+)(?P<n>\S+)', re.M),
+                     "policy_map", "policy-map def", text)
+            text = N(re.compile(
+                r'(\bservice-policy\s+(?:input|output)\s+)(?P<n>\S+)', re.M),
+                     "policy_map", "service-policy ref", text)
 
-        # ── VRF ───────────────────────────────────────────────────────────
-        # Definitions — most specific first to avoid keyword capture
-        text = N(re.compile(r'^(vrf\s+definition\s+)(?P<n>\S+)', re.M),
-                 "vrf", "vrf definition (XE)", text)
+        if cfg.enabled("class-maps"):
+            text = N(re.compile(
+                r'^(class-map\s+(?:match-(?:all|any|not)\s+)?)(?P<n>\S+)', re.M),
+                     "class_map", "class-map def", text)
+            text = N(re.compile(r'^(\s+class\s+)(?P<n>(?!default\b)\S+)', re.M),
+                     "class_map", "class ref", text)
 
-        text = N(re.compile(r'^(ip\s+vrf\s+)(?P<n>\S+)', re.M),
-                 "vrf", "ip vrf (IOS)", text)
+        # ── network-objects / acls ────────────────────────────────────────
+        if cfg.enabled("acls"):
+            text = N(re.compile(
+                r'^(ip(?:v6)?\s+access-list\s+(?:extended|standard|named)?\s*)'
+                r'(?P<n>[A-Za-z]\S*)', re.M),
+                     "acl", "ip access-list def", text)
+            text = N(re.compile(
+                r'(\bip(?:v6)?\s+access-group\s+)(?P<n>[A-Za-z]\S*)', re.M),
+                     "acl", "access-group ref", text)
+            text = N(re.compile(r'(\baccess-class\s+)(?P<n>[A-Za-z]\S*)', re.M),
+                     "acl", "access-class ref", text)
+            text = N(re.compile(
+                r'(\bmatch\s+ip\s+address\s+(?:acl\s+)?)'
+                r'(?P<n>(?!prefix-list\b)[A-Za-z]\S*)', re.M),
+                     "acl", "match ip address ref", text)
+            text = N(re.compile(
+                r'(\bmatch\s+address\s+(?:acl\s+)?)(?P<n>[A-Za-z]\S*)', re.M),
+                     "acl", "match address ref", text)
+            text = N(re.compile(
+                r'(\bmatch\s+access-group\s+name\s+)(?P<n>\S+)', re.M),
+                     "acl", "match access-group name", text)
+            text = N(re.compile(r'(\b(?:RO|RW)\s+IPv[46]\s+)(?P<n>\S+)', re.M),
+                     "acl", "XR SNMP ACL ref", text)
 
-        # IOS XR top-level: "vrf NAME" — negative lookahead for keywords
-        text = N(re.compile(
-            r'^(vrf\s+)(?P<n>(?!definition\b|forwarding\b|member\b)\S+)', re.M),
-                 "vrf", "vrf (XR top-level)", text)
+        if cfg.enabled("prefix-lists"):
+            text = N(re.compile(r'^(ip(?:v6)?\s+prefix-list\s+)(?P<n>\S+)', re.M),
+                     "prefix_list", "prefix-list def", text)
+            text = N(re.compile(r'(\bprefix-list\s+)(?P<n>\S+)', re.M),
+                     "prefix_list", "prefix-list ref", text)
 
-        # References
-        text = N(re.compile(r'^(\s+vrf\s+forwarding\s+)(?P<n>\S+)', re.M),
-                 "vrf", "vrf forwarding (XE)", text)
+        if cfg.enabled("prefix-sets"):
+            text = N(re.compile(r'^(prefix-set\s+)(?P<n>\S+)', re.M),
+                     "prefix_list", "prefix-set def (XR)", text)
+            text = N(re.compile(r'(\bdestination\s+in\s+)(?P<n>\S+)', re.M),
+                     "prefix_list", "XR destination in ref", text)
 
-        text = N(re.compile(r'^(\s+ip\s+vrf\s+forwarding\s+)(?P<n>\S+)', re.M),
-                 "vrf", "ip vrf forwarding (IOS)", text)
+        if cfg.enabled("community-lists"):
+            text = N(re.compile(
+                r'^(ip\s+community-list\s+(?:standard|expanded)\s+)'
+                r'(?P<n>(?!standard\b|expanded\b)\S+)', re.M),
+                     "community_list", "community-list def", text)
+            text = N(re.compile(
+                r'(\bcommunity-list\s+)(?P<n>(?!standard\b|expanded\b)\S+)', re.M),
+                     "community_list", "community-list ref", text)
 
-        # IOS XR interface: "vrf NAME" (indented)
-        text = N(re.compile(
-            r'^(\s+vrf\s+)(?P<n>(?!forwarding\b|member\b)\S+)', re.M),
-                 "vrf", "vrf ref (XR interface)", text)
+        if cfg.enabled("community-sets"):
+            text = N(re.compile(r'^(community-set\s+)(?P<n>\S+)', re.M),
+                     "community_list", "community-set def (XR)", text)
+            text = N(re.compile(r'(\bset\s+community\s+)(?P<n>[A-Za-z]\S*)', re.M),
+                     "community_list", "XR set community ref", text)
 
-        # address-family … vrf NAME
-        text = N(re.compile(
-            r'(\baddress-family\s+\S+(?:\s+\S+)?\s+vrf\s+)(?P<n>\S+)', re.M),
-                 "vrf", "address-family vrf", text)
+        # ── bgp-peers ─────────────────────────────────────────────────────
+        if cfg.enabled("peer-groups"):
+            text = N(re.compile(
+                r'^(\s+neighbor\s+)(?P<n>(?!neighbor\b)[A-Za-z]\S*)(\s+peer-group\s*$)', re.M),
+                     "peer_group", "peer-group declaration", text)
+            text = N(re.compile(
+                r'^(\s+neighbor\s+\S+[^\S\n]+peer-group[^\S\n]+)(?P<n>[A-Za-z]\S+)', re.M),
+                     "peer_group", "peer-group assignment", text)
+            text = N(re.compile(
+                r'^(\s+neighbor\s+)(?P<n>(?!neighbor\b)[A-Za-z][A-Za-z0-9_-]+)'
+                r'(?=\s+(?:description|password|update-source|remote-as'
+                r'|route-map|prefix-list|send-community|activate))', re.M),
+                     "peer_group", "peer-group usage", text)
 
-        # Trailing vrf ref (ip sla, etc.)
-        text = N(re.compile(r'(\s+vrf\s+)(?P<n>\S+)(?=\s*$)', re.M),
-                 "vrf", "trailing vrf ref", text)
+        if cfg.enabled("neighbor-groups"):
+            text = N(re.compile(r'^(\s*neighbor-group\s+)(?P<n>\S+)', re.M),
+                     "neighbor_group", "neighbor-group def (XR)", text)
+            text = N(re.compile(r'^(\s+use\s+neighbor-group\s+)(?P<n>\S+)', re.M),
+                     "neighbor_group", "use neighbor-group (XR)", text)
 
-        # ── Route maps (IOS/XE) ───────────────────────────────────────────
-        text = N(re.compile(r'^(route-map\s+)(?P<n>\S+)', re.M),
-                 "route_map", "route-map def", text)
+        if cfg.enabled("bgp-templates"):
+            text = N(re.compile(
+                r'^(template\s+peer-(?:session|policy)\s+)(?P<n>\S+)', re.M),
+                     "template", "template def", text)
+            text = N(re.compile(
+                r'(\binherit\s+peer-(?:session|policy)\s+)(?P<n>\S+)', re.M),
+                     "template", "template ref", text)
 
-        text = N(re.compile(
-            r'(\broute-map\s+)(?P<n>\S+)(?=\s+(?:in|out|permit|deny|\d))', re.M),
-                 "route_map", "route-map ref", text)
+        # ── crypto-objects ────────────────────────────────────────────────
+        if cfg.enabled("keychains"):
+            text = N(re.compile(r'^(key\s+chain\s+)(?P<n>\S+)', re.M),
+                     "keychain", "key chain def", text)
+            text = N(re.compile(
+                r'(\bip\s+authentication\s+key-chain\s+eigrp\s+\d+\s+)(?P<n>\S+)', re.M),
+                     "keychain", "EIGRP key-chain ref", text)
+            text = N(re.compile(
+                r'(\bkey-chain\s+)(?P<n>(?!eigrp\b)\S+)', re.M),
+                     "keychain", "key-chain ref", text)
 
-        # ── Route policies (IOS XR) ───────────────────────────────────────
-        text = N(re.compile(r'^(route-policy\s+)(?P<n>\S+)', re.M),
-                 "route_map", "route-policy def (XR)", text)
+        if cfg.enabled("crypto-maps"):
+            text = N(re.compile(r'^(crypto\s+map\s+)(?P<n>\S+)', re.M),
+                     "crypto_map", "crypto map", text)
 
-        text = N(re.compile(r'(\broute-policy\s+)(?P<n>\S+)', re.M),
-                 "route_map", "route-policy ref (XR)", text)
+        if cfg.enabled("transform-sets"):
+            text = N(re.compile(
+                r'^(crypto\s+ipsec\s+transform-set\s+)(?P<n>\S+)', re.M),
+                     "transform_set", "transform-set def", text)
+            text = N(re.compile(r'(\bset\s+transform-set\s+)(?P<n>\S+)', re.M),
+                     "transform_set", "transform-set ref", text)
 
-        # ── Policy maps ───────────────────────────────────────────────────
-        text = N(re.compile(r'^(policy-map\s+)(?P<n>\S+)', re.M),
-                 "policy_map", "policy-map def", text)
+        if cfg.enabled("pki-trustpoints"):
+            text = N(re.compile(
+                r'^(crypto\s+pki\s+trustpoint\s+)(?P<n>\S+)', re.M),
+                     "trustpoint", "pki trustpoint def", text)
+            text = N(re.compile(
+                r'^(crypto\s+pki\s+certificate\s+chain\s+)(?P<n>\S+)', re.M),
+                     "trustpoint", "pki certificate chain ref", text)
 
-        text = N(re.compile(
-            r'(\bservice-policy\s+(?:input|output)\s+)(?P<n>\S+)', re.M),
-                 "policy_map", "service-policy ref", text)
+        # ── network-objects (remaining) ───────────────────────────────────
+        if cfg.enabled("object-groups"):
+            text = N(re.compile(
+                r'^(object-group\s+(?:network|service)\s+)(?P<n>\S+)', re.M),
+                     "object_group", "object-group def", text)
+            text = N(re.compile(r'(\bgroup-object\s+)(?P<n>\S+)', re.M),
+                     "object_group", "group-object ref", text)
 
-        # ── Class maps ────────────────────────────────────────────────────
-        text = N(re.compile(
-            r'^(class-map\s+(?:match-(?:all|any|not)\s+)?)(?P<n>\S+)', re.M),
-                 "class_map", "class-map def", text)
+        if cfg.enabled("ip-sla"):
+            text = N(re.compile(r'^(ip\s+sla\s+schedule\s+)(?P<n>\d+)', re.M),
+                     "ip_sla", "ip sla schedule", text)
+            text = N(re.compile(r'^(ip\s+sla\s+)(?P<n>\d+)', re.M),
+                     "ip_sla", "ip sla def", text)
+            text = N(re.compile(r'(\bip\s+sla\s+)(?P<n>\d+)', re.M),
+                     "ip_sla", "ip sla ref", text)
 
-        text = N(re.compile(r'^(\s+class\s+)(?P<n>(?!default\b)\S+)', re.M),
-                 "class_map", "class ref", text)
-
-        # ── Named ACLs ────────────────────────────────────────────────────
-        text = N(re.compile(
-            r'^(ip(?:v6)?\s+access-list\s+(?:extended|standard|named)?\s*)'
-            r'(?P<n>[A-Za-z]\S*)', re.M),
-                 "acl", "ip access-list def", text)
-
-        text = N(re.compile(
-            r'(\bip(?:v6)?\s+access-group\s+)(?P<n>[A-Za-z]\S*)', re.M),
-                 "acl", "access-group ref", text)
-
-        text = N(re.compile(r'(\baccess-class\s+)(?P<n>[A-Za-z]\S*)', re.M),
-                 "acl", "access-class ref", text)
-
-        # "match ip address NAME" — exclude "prefix-list" keyword
-        text = N(re.compile(
-            r'(\bmatch\s+ip\s+address\s+(?:acl\s+)?)'
-            r'(?P<n>(?!prefix-list\b)[A-Za-z]\S*)', re.M),
-                 "acl", "match ip address ref", text)
-
-        # "match address NAME" (IOS route-map style) — optional 'acl' keyword
-        text = N(re.compile(r'(\bmatch\s+address\s+(?:acl\s+)?)(?P<n>[A-Za-z]\S*)', re.M),
-                 "acl", "match address ref", text)
-
-        # match access-group name NAME
-        text = N(re.compile(
-            r'(\bmatch\s+access-group\s+name\s+)(?P<n>\S+)', re.M),
-                 "acl", "match access-group name", text)
-
-        # IOS XR SNMP: RO/RW IPv4 <acl>
-        text = N(re.compile(r'(\b(?:RO|RW)\s+IPv[46]\s+)(?P<n>\S+)', re.M),
-                 "acl", "XR SNMP ACL ref", text)
-
-        # ── Prefix lists (IOS/XE) ─────────────────────────────────────────
-        text = N(re.compile(r'^(ip(?:v6)?\s+prefix-list\s+)(?P<n>\S+)', re.M),
-                 "prefix_list", "prefix-list def", text)
-
-        text = N(re.compile(r'(\bprefix-list\s+)(?P<n>\S+)', re.M),
-                 "prefix_list", "prefix-list ref", text)
-
-        # ── Prefix sets (IOS XR) ──────────────────────────────────────────
-        text = N(re.compile(r'^(prefix-set\s+)(?P<n>\S+)', re.M),
-                 "prefix_list", "prefix-set def (XR)", text)
-
-        text = N(re.compile(r'(\bdestination\s+in\s+)(?P<n>\S+)', re.M),
-                 "prefix_list", "XR destination in ref", text)
-
-        # ── Community lists (IOS/XE) ──────────────────────────────────────
-        # Negative lookahead prevents "standard" / "expanded" being captured
-        text = N(re.compile(
-            r'^(ip\s+community-list\s+(?:standard|expanded)\s+)'
-            r'(?P<n>(?!standard\b|expanded\b)\S+)', re.M),
-                 "community_list", "community-list def", text)
-
-        text = N(re.compile(
-            r'(\bcommunity-list\s+)(?P<n>(?!standard\b|expanded\b)\S+)', re.M),
-                 "community_list", "community-list ref", text)
-
-        # ── Community sets (IOS XR) ───────────────────────────────────────
-        text = N(re.compile(r'^(community-set\s+)(?P<n>\S+)', re.M),
-                 "community_list", "community-set def (XR)", text)
-
-        text = N(re.compile(r'(\bset\s+community\s+)(?P<n>[A-Za-z]\S*)', re.M),
-                 "community_list", "XR set community ref", text)
-
-        # ── BGP peer-groups (IOS/XE) ──────────────────────────────────────
-        # Declaration: "  neighbor NAME peer-group" (NAME is alpha, not an IP)
-        text = N(re.compile(
-            r'^(\s+neighbor\s+)(?P<n>(?!neighbor\b)[A-Za-z]\S*)(\s+peer-group\s*$)', re.M),
-                 "peer_group", "peer-group declaration", text)
-
-        # Assignment: "  neighbor <ip/token> peer-group NAME"
-        # [^\S\n]+ prevents crossing line boundaries
-        text = N(re.compile(
-            r'^(\s+neighbor\s+\S+[^\S\n]+peer-group[^\S\n]+)(?P<n>[A-Za-z]\S+)', re.M),
-                 "peer_group", "peer-group assignment", text)
-
-        # Other peer-group-name config lines (description, password, etc.)
-        text = N(re.compile(
-            r'^(\s+neighbor\s+)(?P<n>(?!neighbor\b)[A-Za-z][A-Za-z0-9_-]+)'
-            r'(?=\s+(?:description|password|update-source|remote-as'
-            r'|route-map|prefix-list|send-community|activate))', re.M),
-                 "peer_group", "peer-group usage", text)
-
-        # ── Neighbor groups (IOS XR) ──────────────────────────────────────
-        text = N(re.compile(r'^(\s*neighbor-group\s+)(?P<n>\S+)', re.M),
-                 "neighbor_group", "neighbor-group def (XR)", text)
-
-        text = N(re.compile(r'^(\s+use\s+neighbor-group\s+)(?P<n>\S+)', re.M),
-                 "neighbor_group", "use neighbor-group (XR)", text)
-
-        # ── Keychains ─────────────────────────────────────────────────────
-        text = N(re.compile(r'^(key\s+chain\s+)(?P<n>\S+)', re.M),
-                 "keychain", "key chain def", text)
-
-        # EIGRP key-chain reference — must come before generic key-chain ref
-        text = N(re.compile(
-            r'(\bip\s+authentication\s+key-chain\s+eigrp\s+\d+\s+)(?P<n>\S+)', re.M),
-                 "keychain", "EIGRP key-chain ref", text)
-
-        # Generic key-chain ref — exclude the word "eigrp"
-        text = N(re.compile(
-            r'(\bkey-chain\s+)(?P<n>(?!eigrp\b)\S+)', re.M),
-                 "keychain", "key-chain ref", text)
-
-        # ── Crypto maps ───────────────────────────────────────────────────
-        text = N(re.compile(r'^(crypto\s+map\s+)(?P<n>\S+)', re.M),
-                 "crypto_map", "crypto map", text)
-
-        # ── Transform sets ────────────────────────────────────────────────
-        # Definition: crypto ipsec transform-set NAME ...
-        text = N(re.compile(
-            r'^(crypto\s+ipsec\s+transform-set\s+)(?P<n>\S+)', re.M),
-                 "transform_set", "transform-set def", text)
-
-        # Reference: set transform-set NAME (inside crypto map)
-        text = N(re.compile(r'(\bset\s+transform-set\s+)(?P<n>\S+)', re.M),
-                 "transform_set", "transform-set ref", text)
-
-        # ── PKI trustpoints ───────────────────────────────────────────────
-        # Definition: crypto pki trustpoint NAME
-        text = N(re.compile(
-            r'^(crypto\s+pki\s+trustpoint\s+)(?P<n>\S+)', re.M),
-                 "trustpoint", "pki trustpoint def", text)
-
-        # Reference: crypto pki certificate chain NAME
-        text = N(re.compile(
-            r'^(crypto\s+pki\s+certificate\s+chain\s+)(?P<n>\S+)', re.M),
-                 "trustpoint", "pki certificate chain ref", text)
-
-        # ── Object groups ─────────────────────────────────────────────────
-        text = N(re.compile(
-            r'^(object-group\s+(?:network|service)\s+)(?P<n>\S+)', re.M),
-                 "object_group", "object-group def", text)
-
-        text = N(re.compile(r'(\bgroup-object\s+)(?P<n>\S+)', re.M),
-                 "object_group", "group-object ref", text)
-
-        # ── IP SLA ────────────────────────────────────────────────────────
-        # Schedule must come before def so the number is tokenised first
-        text = N(re.compile(r'^(ip\s+sla\s+schedule\s+)(?P<n>\d+)', re.M),
-                 "ip_sla", "ip sla schedule", text)
-
-        text = N(re.compile(r'^(ip\s+sla\s+)(?P<n>\d+)', re.M),
-                 "ip_sla", "ip sla def", text)
-
-        text = N(re.compile(r'(\bip\s+sla\s+)(?P<n>\d+)', re.M),
-                 "ip_sla", "ip sla ref", text)
-
-        # ── Track objects ─────────────────────────────────────────────────
-        text = N(re.compile(r'^(track\s+)(?P<n>\d+)', re.M),
-                 "track", "track def", text)
-
-        text = N(re.compile(r'(\btrack\s+)(?P<n>\d+)', re.M),
-                 "track", "track ref", text)
-
-        # ── BGP templates ─────────────────────────────────────────────────
-        text = N(re.compile(
-            r'^(template\s+peer-(?:session|policy)\s+)(?P<n>\S+)', re.M),
-                 "template", "template def", text)
-
-        text = N(re.compile(
-            r'(\binherit\s+peer-(?:session|policy)\s+)(?P<n>\S+)', re.M),
-                 "template", "template ref", text)
+        if cfg.enabled("track-objects"):
+            text = N(re.compile(r'^(track\s+)(?P<n>\d+)', re.M),
+                     "track", "track def", text)
+            text = N(re.compile(r'(\btrack\s+)(?P<n>\d+)', re.M),
+                     "track", "track ref", text)
 
         return text
 
@@ -932,6 +1207,8 @@ class CiscoSanitiser:
                neighbor <x> description <text>
           3. Inline descriptions on route-map / object-group / etc. lines
         """
+        cfg = self._cfg
+
         def repl(m: re.Match) -> str:
             prefix = m.group(1)
             desc = m.group(2)
@@ -939,17 +1216,15 @@ class CiscoSanitiser:
                 return m.group(0)
             return prefix + self.tokens.get("description", desc)
 
-        # Standalone description lines (leading whitespace optional)
-        text = self._sub(
-            re.compile(r'^(\s*description\s+)(.+)$', re.M),
-            repl, text, "standalone description lines")
+        if cfg.enabled("standalone-descriptions"):
+            text = self._sub(
+                re.compile(r'^(\s*description\s+)(.+)$', re.M),
+                repl, text, "standalone description lines")
 
-        # Inline: anything containing " description <text>" mid-line
-        # e.g. "ip prefix-list NAME description text"
-        #      " neighbor X description text"
-        text = self._sub(
-            re.compile(r'(\s+description\s+)(.+)$', re.M),
-            repl, text, "inline description text")
+        if cfg.enabled("inline-descriptions"):
+            text = self._sub(
+                re.compile(r'(\s+description\s+)(.+)$', re.M),
+                repl, text, "inline description text")
 
         return text
 
@@ -980,35 +1255,108 @@ def parse_args() -> argparse.Namespace:
         description="Sanitise Cisco IOS / IOS XE / IOS XR configuration files.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Selection flags (can be combined; item > pass > group precedence):
+  --skip-group credentials      skip the entire credentials group
+  --only-group named-objects    run only the named-objects group
+  --skip-pass  vpn-keys         skip the vpn-keys pass
+  --only-pass  routing-auth     run only the routing-auth pass
+  --skip       banner-body,ntp-keys   skip specific items
+  --only       hostname,ipv4-addresses  run only these items
+
+Available groups : credentials, snmp, bgp-topology, named-objects,
+                   addressing, descriptions
+Available passes : local-auth, routing-auth, aaa-keys, vpn-keys, pki,
+                   device-identity, informational, snmp, as-numbers,
+                   identity, routing-policy, bgp-peers, network-objects,
+                   aaa-objects, crypto-objects, ipv4, ipv6, descriptions
+Run with --list-items to see all available item IDs.
+
+Legacy flags (still supported):
+  --no-ips          equivalent to --skip-group addressing
+  --no-descriptions equivalent to --skip-pass  descriptions
+
 Examples:
   python cisco_sanitise.py -i ./configs/ -o ./clean/ --seed myproject
-  python cisco_sanitise.py -i router.cfg -o router_clean.cfg --dump-map map.json
   python cisco_sanitise.py -i router.cfg --dry-run
-  python cisco_sanitise.py -i ./configs/ -o ./clean/ --no-ips --no-descriptions
+  python cisco_sanitise.py -i router.cfg --skip-group addressing,descriptions
+  python cisco_sanitise.py -i router.cfg --only-group credentials,snmp
+  python cisco_sanitise.py -i router.cfg --skip banner-body,call-home-fields
         """
     )
-    p.add_argument("-i", "--input",     required=True,
+    p.add_argument("-i", "--input",       required=False,
                    help="Input file or directory")
-    p.add_argument("-o", "--output",    required=False,
+    p.add_argument("-o", "--output",      required=False,
                    help="Output file or directory")
-    p.add_argument("--seed",            default="cisco-sanitise",
+    p.add_argument("--seed",              default="cisco-sanitise",
                    help="Determinism seed — same seed = same tokens every run")
-    p.add_argument("--no-ips",          action="store_true",
-                   help="Skip IP address anonymisation")
-    p.add_argument("--no-descriptions", action="store_true",
-                   help="Skip description line anonymisation")
-    p.add_argument("--dump-map",        metavar="FILE",
+    p.add_argument("--dump-map",          metavar="FILE",
                    help="Write full original→token mapping to a JSON file")
-    p.add_argument("--dry-run",         action="store_true",
+    p.add_argument("--dry-run",           action="store_true",
                    help="Print sanitised output to stdout; do not write files")
-    p.add_argument("--extensions",      default=".cfg,.txt,.conf,.log",
-                   help="Comma-separated file extensions to process")
-    return p.parse_args()
+    p.add_argument("--extensions",        default=".cfg,.txt,.conf,.log",
+                   help="Comma-separated file extensions to process when input is a directory")
+    p.add_argument("--list-items",        action="store_true",
+                   help="Print all valid group / pass / item IDs and exit")
 
+    # Selection flags
+    sel = p.add_argument_group("selection (group level)")
+    sel.add_argument("--skip-group", metavar="GROUP[,GROUP...]", default="",
+                     help="Disable all items in the named group(s)")
+    sel.add_argument("--only-group", metavar="GROUP[,GROUP...]", default="",
+                     help="Enable only the named group(s); disable everything else")
+
+    sel2 = p.add_argument_group("selection (pass level)")
+    sel2.add_argument("--skip-pass", metavar="PASS[,PASS...]", default="",
+                      help="Disable all items in the named pass(es)")
+    sel2.add_argument("--only-pass", metavar="PASS[,PASS...]", default="",
+                      help="Enable only the named pass(es); disable everything else")
+
+    sel3 = p.add_argument_group("selection (item level)")
+    sel3.add_argument("--skip", metavar="ITEM[,ITEM...]", default="",
+                      help="Disable the named item(s)")
+    sel3.add_argument("--only", metavar="ITEM[,ITEM...]", default="",
+                      help="Enable only the named item(s); disable everything else")
+
+    # Legacy aliases (kept for backward compatibility)
+    leg = p.add_argument_group("legacy flags (deprecated aliases)")
+    leg.add_argument("--no-ips",          action="store_true",
+                     help="Skip IP address anonymisation (alias: --skip-group addressing)")
+    leg.add_argument("--no-descriptions", action="store_true",
+                     help="Skip description anonymisation (alias: --skip-pass descriptions)")
+
+    args = p.parse_args()
+
+    # --list-items: print hierarchy and exit
+    if args.list_items:
+        print("\nAvailable groups, passes, and items:\n")
+        for group_id, passes in SANITISE_HIERARCHY.items():
+            print(f"  GROUP: {group_id}")
+            for pass_id, items in passes.items():
+                print(f"    PASS: {pass_id}")
+                for item in items:
+                    print(f"      item: {item}")
+        print()
+        sys.exit(0)
+
+    if not args.input:
+        p.error("the following arguments are required: -i/--input")
+
+    # Normalise comma-separated values to lists
+    def _split(s: str) -> list[str]:
+        return [x.strip() for x in s.split(",") if x.strip()]
+
+    args.skip_group = _split(args.skip_group)
+    args.only_group = _split(args.only_group)
+    args.skip_pass  = _split(args.skip_pass)
+    args.only_pass  = _split(args.only_pass)
+    args.skip       = _split(args.skip)
+    args.only       = _split(args.only)
+
+    return args
 
 # Repository URL — update this when the project is published.
 # This value is embedded in the sanitised-configuration banner.
-REPO_URL = "https://github.com/spaldingd/config-sanitiser-cisco"
+REPO_URL = "https://github.com/YOUR-ORG/YOUR-REPO"
 
 
 def _seed_fingerprint(seed: str) -> str:
@@ -1027,32 +1375,44 @@ def _seed_fingerprint(seed: str) -> str:
     return hashlib.sha256(seed.encode()).hexdigest()[:16]
 
 
-def _sanitised_banner(seed: str, anonymise_ips: bool,
-                      anonymise_descriptions: bool) -> str:
+def _sanitised_banner(seed: str, cfg: SanitiserConfig) -> str:
     """
     Return a comment block to prepend to every sanitised output file.
     Uses '!' as the comment character, which is valid on IOS, IOS XE, and IOS XR.
-    The action list is dynamic — IP and description lines are only included when
-    those passes are active.
+    The action list is derived from SanitiserConfig so it accurately reflects
+    what was actually run.
     The seed fingerprint (not the seed itself) is included so that two sanitised
-    files can be confirmed as using the same seed without exposing it.
+    files can be confirmed as sharing the same seed without exposing it.
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     fingerprint = _seed_fingerprint(seed)
-    actions = [
-        "credentials and keys replaced with <REMOVED>",
-        "device identity data (Smart Licensing UDI) replaced with <REMOVED>",
-        "named objects (hostnames, VRFs, ACLs, route-maps, etc.) replaced with"
-        " opaque tokens",
+
+    # Build action lines at the most specific accurate level.
+    # Each entry is (condition, label).
+    action_map = [
+        (cfg.group_has_any("credentials"),
+         "credentials and keys replaced with <REMOVED>"),
+        (cfg.enabled("license-udi"),
+         "device identity data (Smart Licensing UDI) replaced with <REMOVED>"),
+        (cfg.group_has_any("snmp"),
+         "SNMP communities, location, and contact sanitised"),
+        (cfg.group_has_any("bgp-topology"),
+         "BGP AS numbers and community values replaced with opaque tokens"),
+        (cfg.group_has_any("named-objects"),
+         "named objects (hostnames, VRFs, ACLs, route-maps, etc.) replaced with"
+         " opaque tokens"),
+        (cfg.group_has_any("addressing"),
+         "IP addresses (IPv4 and IPv6) replaced with opaque tokens"),
+        (cfg.pass_has_any("descriptions"),
+         "description text replaced with opaque tokens"),
     ]
-    if anonymise_ips:
-        actions.append(
-            "IP addresses (IPv4 and IPv6) replaced with opaque tokens")
-    if anonymise_descriptions:
-        actions.append("description text replaced with opaque tokens")
+    actions = [label for condition, label in action_map if condition]
+
+    # Note any entirely-skipped groups so the reader knows what was NOT done
+    skipped = sorted(cfg.disabled_groups())
 
     sep = "!" + "=" * 69
-    lines = [
+    out_lines = [
         sep,
         "! SANITISED CONFIGURATION",
         "! This file has been processed by cisco_sanitise.py.",
@@ -1060,17 +1420,21 @@ def _sanitised_banner(seed: str, anonymise_ips: bool,
         "!",
     ]
     for action in actions:
-        lines.append(f"!   - {action}")
-    lines += [
+        out_lines.append(f"!   - {action}")
+    if skipped:
+        out_lines.append("!")
+        out_lines.append("! The following sanitisation groups were skipped:")
+        for g in skipped:
+            out_lines.append(f"!   - {g}")
+    out_lines += [
         "!",
         f"! Sanitised   : {now}",
         f"! Seed hash   : {fingerprint}  (SHA-256 fingerprint — not the seed itself)",
         f"! Script      : {REPO_URL}",
         sep,
-        "",   # blank line before the config body begins
+        "",
     ]
-    return "\n".join(lines) + "\n"
-
+    return "\n".join(out_lines) + "\n"
 
 def process_file(path: Path, dest: "Path | None",
                  sanitiser: CiscoSanitiser, dry_run: bool) -> bool:
@@ -1083,12 +1447,7 @@ def process_file(path: Path, dest: "Path | None",
         return False
 
     result = sanitiser.process(text)
-    banner = _sanitised_banner(
-        seed=sanitiser.tokens.seed,
-        anonymise_ips=sanitiser.ip_anon is not None,
-        anonymise_descriptions=sanitiser.anonymise_descriptions,
-    )
-    result = banner + result
+    result = _sanitised_banner(sanitiser.tokens.seed, sanitiser._cfg) + result
     for entry in sanitiser.log:
         print(entry)
 
@@ -1105,11 +1464,8 @@ def process_file(path: Path, dest: "Path | None",
 
 def main() -> None:
     args = parse_args()
-    sanitiser = CiscoSanitiser(
-        seed=args.seed,
-        anonymise_ips=not args.no_ips,
-        anonymise_descriptions=not args.no_descriptions,
-    )
+    cfg = SanitiserConfig.from_args(args)
+    sanitiser = CiscoSanitiser(seed=args.seed, cfg=cfg)
     exts = tuple(e if e.startswith(".") else f".{e}"
                  for e in args.extensions.split(","))
     inp = Path(args.input)
@@ -1119,10 +1475,12 @@ def main() -> None:
     print("║       Cisco Configuration Sanitiser  (unified)          ║")
     print("║  IOS · IOS XE · IOS XR                                  ║")
     print("╚══════════════════════════════════════════════════════════╝")
-    print(f"  Seed            : {args.seed}")
-    print(f"  Anonymise IPs   : {'No' if args.no_ips else 'Yes (IPv4-xxxx / IPv6-xxxx tokens)'}")
-    print(f"  Anonymise descs : {'No' if args.no_descriptions else 'Yes'}")
-    print(f"  Dry run         : {'Yes' if args.dry_run else 'No'}")
+    print(f"  Seed     : {args.seed}")
+    print(f"  Dry run  : {'Yes' if args.dry_run else 'No'}")
+    for line in cfg.summary_lines():
+        print(line)
+    if not cfg.summary_lines():
+        print("  Selection: all items enabled (default)")
 
     success = failure = 0
 
@@ -1160,7 +1518,6 @@ def main() -> None:
         map_path = Path(args.dump_map)
         map_path.write_text(sanitiser.mapping_report(as_json=True), encoding="utf-8")
         print(f"\n  Mapping saved to: {map_path}")
-
 
 if __name__ == "__main__":
     main()
